@@ -27,8 +27,7 @@ import os
 import argparse
 
 # Import base converter components
-# (In practice, this would import from fortigate_palo_converter.py)
-# For this example, assume it's available
+from fortigate_palo_converter import FortiGateAPI, FortiGateParser
 
 # Import enhanced addon
 from fortigate_enhanced_addon import (
@@ -90,16 +89,20 @@ Examples:
         print()
         
         # Initialize base API and parser
-        # (This would use the actual FortiGateAPI and FortiGateParser from base script)
-        # For this example, showing the structure
-        
-        base_api = None  # Would be: FortiGateAPI(args.host, ...)
-        base_parser = None  # Would be: FortiGateParser(base_api)
+        base_api = FortiGateAPI(
+            host=args.host,
+            api_key=args.api_key,
+            username=args.username,
+            password=args.password,
+            vdom=args.vdom,
+            verify_ssl=not args.no_verify_ssl
+        )
+        base_parser = FortiGateParser(base_api)
         
         # Parse base configuration
         print("Phase 1: Base Configuration Discovery")
         print("-" * 70)
-        # base_parser.parse()  # Would parse base features
+        base_parser.parse()
         
         # Enhanced features if requested
         enhanced_parser = None

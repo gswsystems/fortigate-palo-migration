@@ -144,120 +144,129 @@ class EnhancedFortiGateAPI:
     
     def __init__(self, base_api):
         self.api = base_api
-    
+
+    def _safe_get(self, endpoint: str, default=None):
+        """Safely call the API, returning default on error (e.g. removed endpoints in newer FortiOS)"""
+        if default is None:
+            default = {}
+        try:
+            return self.api.get(endpoint)
+        except Exception:
+            return default
+
     def get_ipv6_addresses(self) -> List[dict]:
         """Get IPv6 address objects"""
-        result = self.api.get('cmdb/firewall/address6')
+        result = self._safe_get('cmdb/firewall/address6')
         return result.get('results', [])
-    
+
     def get_ipv6_address_groups(self) -> List[dict]:
         """Get IPv6 address groups"""
-        result = self.api.get('cmdb/firewall/addrgrp6')
+        result = self._safe_get('cmdb/firewall/addrgrp6')
         return result.get('results', [])
-    
+
     def get_ipv6_policies(self) -> List[dict]:
         """Get IPv6 firewall policies"""
-        result = self.api.get('cmdb/firewall/policy6')
+        result = self._safe_get('cmdb/firewall/policy6')
         return result.get('results', [])
-    
+
     def get_ipsec_phase1(self) -> List[dict]:
         """Get IPsec Phase 1 interfaces"""
-        result = self.api.get('cmdb/vpn.ipsec/phase1-interface')
+        result = self._safe_get('cmdb/vpn.ipsec/phase1-interface')
         return result.get('results', [])
-    
+
     def get_ipsec_phase2(self) -> List[dict]:
         """Get IPsec Phase 2 selectors"""
-        result = self.api.get('cmdb/vpn.ipsec/phase2-interface')
+        result = self._safe_get('cmdb/vpn.ipsec/phase2-interface')
         return result.get('results', [])
-    
+
     def get_ssl_vpn_settings(self) -> dict:
         """Get SSL VPN settings"""
-        result = self.api.get('cmdb/vpn.ssl/settings')
+        result = self._safe_get('cmdb/vpn.ssl/settings')
         return result.get('results', [{}])[0]
-    
+
     def get_ospf_config(self) -> dict:
         """Get OSPF configuration"""
-        result = self.api.get('cmdb/router/ospf')
+        result = self._safe_get('cmdb/router/ospf')
         return result.get('results', [{}])[0]
-    
+
     def get_bgp_config(self) -> dict:
         """Get BGP configuration"""
-        result = self.api.get('cmdb/router/bgp')
+        result = self._safe_get('cmdb/router/bgp')
         return result.get('results', [{}])[0]
-    
+
     def get_local_users(self) -> List[dict]:
         """Get local user accounts"""
-        result = self.api.get('cmdb/user/local')
+        result = self._safe_get('cmdb/user/local')
         return result.get('results', [])
-    
+
     def get_user_groups(self) -> List[dict]:
         """Get user groups"""
-        result = self.api.get('cmdb/user/group')
+        result = self._safe_get('cmdb/user/group')
         return result.get('results', [])
-    
+
     def get_radius_servers(self) -> List[dict]:
         """Get RADIUS servers"""
-        result = self.api.get('cmdb/user/radius')
+        result = self._safe_get('cmdb/user/radius')
         return result.get('results', [])
-    
+
     def get_ldap_servers(self) -> List[dict]:
         """Get LDAP servers"""
-        result = self.api.get('cmdb/user/ldap')
+        result = self._safe_get('cmdb/user/ldap')
         return result.get('results', [])
-    
+
     def get_antivirus_profiles(self) -> List[dict]:
         """Get antivirus profiles"""
-        result = self.api.get('cmdb/antivirus/profile')
+        result = self._safe_get('cmdb/antivirus/profile')
         return result.get('results', [])
-    
+
     def get_ips_sensors(self) -> List[dict]:
         """Get IPS sensors"""
-        result = self.api.get('cmdb/ips/sensor')
+        result = self._safe_get('cmdb/ips/sensor')
         return result.get('results', [])
-    
+
     def get_webfilter_profiles(self) -> List[dict]:
         """Get web filter profiles"""
-        result = self.api.get('cmdb/webfilter/profile')
+        result = self._safe_get('cmdb/webfilter/profile')
         return result.get('results', [])
-    
+
     def get_application_lists(self) -> List[dict]:
         """Get application control lists"""
-        result = self.api.get('cmdb/application/list')
+        result = self._safe_get('cmdb/application/list')
         return result.get('results', [])
-    
+
     def get_ssl_ssh_profiles(self) -> List[dict]:
         """Get SSL/SSH inspection profiles"""
-        result = self.api.get('cmdb/firewall/ssl-ssh-profile')
+        result = self._safe_get('cmdb/firewall/ssl-ssh-profile')
         return result.get('results', [])
-    
+
     def get_dhcp_servers(self) -> List[dict]:
         """Get DHCP server configuration"""
-        result = self.api.get('cmdb/system.dhcp/server')
+        result = self._safe_get('cmdb/system.dhcp/server')
         return result.get('results', [])
-    
+
     def get_syslog_settings(self) -> dict:
         """Get syslog settings"""
-        result = self.api.get('cmdb/log.syslog/setting')
+        result = self._safe_get('cmdb/log.syslogd/setting')
         return result.get('results', [{}])[0]
-    
+
     def get_certificates(self) -> List[dict]:
         """Get local certificates"""
-        result = self.api.get('cmdb/certificate/local')
+        result = self._safe_get('cmdb/certificate/local')
         return result.get('results', [])
-    
+
     def get_sdwan_zones(self) -> List[dict]:
         """Get SD-WAN zones"""
-        result = self.api.get('cmdb/system/sdwan')
+        result = self._safe_get('cmdb/system/sdwan')
         return result.get('results', [{}])[0].get('zone', [])
-    
+
     def get_sdwan_rules(self) -> List[dict]:
         """Get SD-WAN rules"""
-        result = self.api.get('cmdb/system/sdwan')
+        result = self._safe_get('cmdb/system/sdwan')
         return result.get('results', [{}])[0].get('service', [])
-    
+
     def get_ha_config(self) -> dict:
         """Get HA configuration"""
-        result = self.api.get('cmdb/system/ha')
+        result = self._safe_get('cmdb/system/ha')
         return result.get('results', [{}])[0]
 
 
