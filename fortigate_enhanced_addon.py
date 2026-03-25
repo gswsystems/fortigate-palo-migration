@@ -154,6 +154,15 @@ class EnhancedFortiGateAPI:
         except Exception:
             return default
 
+    def _safe_get_single(self, endpoint: str) -> dict:
+        """Safely get a singleton config object (ospf, bgp, ha, etc.)
+        Handles both list and dict results across FortiOS versions."""
+        result = self._safe_get(endpoint)
+        results = result.get('results', {})
+        if isinstance(results, list):
+            return results[0] if results else {}
+        return results if isinstance(results, dict) else {}
+
     def get_ipv6_addresses(self) -> List[dict]:
         """Get IPv6 address objects"""
         result = self._safe_get('cmdb/firewall/address6')
@@ -181,18 +190,15 @@ class EnhancedFortiGateAPI:
 
     def get_ssl_vpn_settings(self) -> dict:
         """Get SSL VPN settings"""
-        result = self._safe_get('cmdb/vpn.ssl/settings')
-        return result.get('results', [{}])[0]
+        return self._safe_get_single('cmdb/vpn.ssl/settings')
 
     def get_ospf_config(self) -> dict:
         """Get OSPF configuration"""
-        result = self._safe_get('cmdb/router/ospf')
-        return result.get('results', [{}])[0]
+        return self._safe_get_single('cmdb/router/ospf')
 
     def get_bgp_config(self) -> dict:
         """Get BGP configuration"""
-        result = self._safe_get('cmdb/router/bgp')
-        return result.get('results', [{}])[0]
+        return self._safe_get_single('cmdb/router/bgp')
 
     def get_local_users(self) -> List[dict]:
         """Get local user accounts"""
@@ -246,8 +252,7 @@ class EnhancedFortiGateAPI:
 
     def get_syslog_settings(self) -> dict:
         """Get syslog settings"""
-        result = self._safe_get('cmdb/log.syslogd/setting')
-        return result.get('results', [{}])[0]
+        return self._safe_get_single('cmdb/log.syslogd/setting')
 
     def get_certificates(self) -> List[dict]:
         """Get local certificates"""
@@ -256,18 +261,15 @@ class EnhancedFortiGateAPI:
 
     def get_sdwan_zones(self) -> List[dict]:
         """Get SD-WAN zones"""
-        result = self._safe_get('cmdb/system/sdwan')
-        return result.get('results', [{}])[0].get('zone', [])
+        return self._safe_get_single('cmdb/system/sdwan').get('zone', [])
 
     def get_sdwan_rules(self) -> List[dict]:
         """Get SD-WAN rules"""
-        result = self._safe_get('cmdb/system/sdwan')
-        return result.get('results', [{}])[0].get('service', [])
+        return self._safe_get_single('cmdb/system/sdwan').get('service', [])
 
     def get_ha_config(self) -> dict:
         """Get HA configuration"""
-        result = self._safe_get('cmdb/system/ha')
-        return result.get('results', [{}])[0]
+        return self._safe_get_single('cmdb/system/ha')
 
 
 class EnhancedParser:
