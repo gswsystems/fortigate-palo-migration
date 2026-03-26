@@ -63,7 +63,7 @@ Examples:
     parser.add_argument('--username', help='Username (alternative to API key)')
     parser.add_argument('--password', help='Password (alternative to API key)')
     parser.add_argument('--vdom', default='root', help='VDOM to query')
-    parser.add_argument('--no-verify-ssl', action='store_true', help='Disable SSL verification')
+    parser.add_argument('--verify-ssl', action='store_true', help='Enable SSL certificate verification (disabled by default)')
     
     # Output parameters
     parser.add_argument('-o', '--output', default='palo_alto.tf', help='Terraform output file')
@@ -95,7 +95,7 @@ Examples:
             username=args.username,
             password=args.password,
             vdom=args.vdom,
-            verify_ssl=not args.no_verify_ssl
+            verify_ssl=args.verify_ssl
         )
         base_parser = FortiGateParser(base_api)
         
