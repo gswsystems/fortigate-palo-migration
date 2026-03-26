@@ -151,7 +151,10 @@ class FortiGateAPI:
     
     def __init__(self, host: str, api_key: str = None, username: str = None, 
                  password: str = None, vdom: str = "root", verify_ssl: bool = False):
-        self.host = host.rstrip('/')
+        host = host.rstrip('/')
+        if not host.startswith(('http://', 'https://')):
+            host = f"https://{host}"
+        self.host = host
         self.api_key = api_key
         self.username = username
         self.password = password
@@ -751,10 +754,11 @@ provider "panos" {
             tf_name = self.sanitize_name(name)
             
             # Format static members
-            members_list = [f'    panos_address_object.{self.sanitize_name(m)}.name' 
+            members_list = [f'    panos_address_object.{self.sanitize_name(m)}.name'
                            for m in group.members]
             members_str = ',\n'.join(members_list)
-            
+            depends_str = ',\n'.join(f'    panos_address_object.{self.sanitize_name(m)}' for m in group.members)
+
             resource = f"""resource "panos_address_group" "{tf_name}" {{
   name         = "{name}"
   description  = {self._format_comment(group.comment)}
@@ -764,7 +768,7 @@ provider "panos" {
   device_group = "{self.device_group}"
 
   depends_on = [
-{',\n'.join(f'    panos_address_object.{self.sanitize_name(m)}' for m in group.members)}
+{depends_str}
   ]
 }}
 
@@ -822,10 +826,11 @@ provider "panos" {
             tf_name = self.sanitize_name(name)
             
             # Format members
-            members_list = [f'    panos_service_object.{self.sanitize_name(m)}.name' 
+            members_list = [f'    panos_service_object.{self.sanitize_name(m)}.name'
                            for m in group.members]
             members_str = ',\n'.join(members_list)
-            
+            depends_str = ',\n'.join(f'    panos_service_object.{self.sanitize_name(m)}' for m in group.members)
+
             resource = f"""resource "panos_service_group" "{tf_name}" {{
   name        = "{name}"
   services    = [
@@ -834,7 +839,7 @@ provider "panos" {
   device_group = "{self.device_group}"
 
   depends_on = [
-{',\n'.join(f'    panos_service_object.{self.sanitize_name(m)}' for m in group.members)}
+{depends_str}
   ]
 }}
 
@@ -989,9 +994,10 @@ resource "panos_address_object" "{tf_name}_nat_pool" {{
         
         depends_on_str = ''
         if depends_on:
+            depends_items = ',\n'.join(set(depends_on))
             depends_on_str = f"""
   depends_on = [
-{',\n'.join(set(depends_on))}
+{depends_items}
   ]"""
         
         # Logging
@@ -1319,9 +1325,9 @@ Environment Variables:
                        default='palo_alto.tf',
                        help='Output Terraform file (default: palo_alto.tf)')
     
-    parser.add_argument('--no-verify-ssl',
+    parser.add_argument('--verify-ssl',
                        action='store_true',
-                       help='Disable SSL certificate verification')
+                       help='Enable SSL certificate verification (disabled by default)')
     
     parser.add_argument('--save-json',
                        help='Save raw API responses to JSON file for debugging')
@@ -1346,7 +1352,7 @@ Environment Variables:
             username=args.username,
             password=args.password,
             vdom=args.vdom,
-            verify_ssl=not args.no_verify_ssl
+            verify_ssl=args.verify_ssl
         )
         
         # Parse configuration
