@@ -124,7 +124,7 @@ Examples:
             template=args.template
         )
         terraform_config = tf_gen.generate_all()
-        with open(args.output, 'w') as f:
+        with open(args.output, 'w', encoding='utf-8') as f:
             f.write(terraform_config)
         print(f"✓ Terraform written to: {args.output}")
         

@@ -1374,8 +1374,8 @@ Environment Variables:
                 'zones': fg_parser.zones
             }
             
-            with open(args.save_json, 'w') as f:
-                json.dump(debug_data, f, indent=2, default=str)
+            with open(args.save_json, 'w', encoding='utf-8') as f:
+                json.dump(debug_data, f, indent=2, default=str, ensure_ascii=False)
             print(f"Saved debug JSON to: {args.save_json}")
         
         # Generate Terraform
@@ -1395,7 +1395,7 @@ Environment Variables:
         terraform_config = tf_gen.generate_all()
         
         # Write output
-        with open(args.output, 'w') as f:
+        with open(args.output, 'w', encoding='utf-8') as f:
             f.write(terraform_config)
         
         print(f"\n✓ Terraform configuration written to: {args.output}")

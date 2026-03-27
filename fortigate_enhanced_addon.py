@@ -633,7 +633,7 @@ class MigrationReportGenerator:
         
         report = "\n\n".join(sections)
         
-        with open(output_file, 'w') as f:
+        with open(output_file, 'w', encoding='utf-8') as f:
             f.write(report)
         
         return output_file
