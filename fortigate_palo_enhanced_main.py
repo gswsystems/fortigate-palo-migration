@@ -27,7 +27,7 @@ import os
 import argparse
 
 # Import base converter components
-from fortigate_palo_converter import FortiGateAPI, FortiGateParser
+from fortigate_palo_converter import FortiGateAPI, FortiGateParser, TerraformGenerator
 
 # Import enhanced addon
 from fortigate_enhanced_addon import (
@@ -117,10 +117,15 @@ Examples:
         # Generate Terraform
         print("\nPhase 3: Terraform Generation")
         print("-" * 70)
-        # tf_gen = TerraformGenerator(base_parser, ...)
-        # terraform_config = tf_gen.generate_all()
-        # with open(args.output, 'w') as f:
-        #     f.write(terraform_config)
+        tf_gen = TerraformGenerator(
+            base_parser,
+            device_group=args.device_group,
+            vsys=args.vsys,
+            template=args.template
+        )
+        terraform_config = tf_gen.generate_all()
+        with open(args.output, 'w') as f:
+            f.write(terraform_config)
         print(f"✓ Terraform written to: {args.output}")
         
         # Generate migration report
