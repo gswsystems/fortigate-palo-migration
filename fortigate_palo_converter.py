@@ -21,6 +21,8 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 
+import os
+import re
 import requests
 import urllib3
 import sys
@@ -658,13 +660,24 @@ class TerraformGenerator:
 
 """
     
+    def _generate_location(self) -> str:
+        """Generate the location block based on device_group setting"""
+        if self.device_group == "shared":
+            return "  location = { shared = {} }"
+        else:
+            return f"""  location = {{
+    device_group = {{
+      name = "{self.device_group}"
+    }}
+  }}"""
+
     def _generate_provider(self) -> str:
         """Generate Terraform provider configuration"""
         return """terraform {
   required_providers {
     panos = {
       source  = "PaloAltoNetworks/panos"
-      version = "~> 1.13"
+      version = "~> 2.0"
     }
   }
 }
@@ -680,92 +693,89 @@ provider "panos" {
     def _generate_addresses(self) -> str:
         """Generate address objects"""
         output = ["# ===== Address Objects =====\n"]
-        
+        location = self._generate_location()
+
         for name, addr in self.parser.addresses.items():
             tf_name = self.sanitize_name(name)
-            
+            desc_line = ""
+            if addr.comment:
+                desc_line = f"\n  description = {self._format_comment(addr.comment)}"
+
             if addr.type == 'ipmask' and addr.subnet:
-                # IP/Netmask address
-                cidr_parts = addr.subnet.split('/')
-                if len(cidr_parts) == 2:
-                    ip, prefix = cidr_parts
-                    
-                    resource = f"""resource "panos_address_object" "{tf_name}" {{
-  name        = "{name}"
-  value       = "{addr.subnet}"
-  type        = "ip-netmask"
-  description = {self._format_comment(addr.comment)}
-  device_group = "{self.device_group}"
+                resource = f"""resource "panos_address" "{tf_name}" {{
+{location}
+
+  name       = "{name}"
+  ip_netmask = "{addr.subnet}"{desc_line}
 }}
 
 """
-                    output.append(resource)
-            
+                output.append(resource)
+
             elif addr.type == 'iprange' and addr.ip_range:
-                # IP Range
                 start_ip, end_ip = addr.ip_range
-                resource = f"""resource "panos_address_object" "{tf_name}" {{
-  name        = "{name}"
-  value       = "{start_ip}-{end_ip}"
-  type        = "ip-range"
-  description = {self._format_comment(addr.comment)}
-  device_group = "{self.device_group}"
+                resource = f"""resource "panos_address" "{tf_name}" {{
+{location}
+
+  name     = "{name}"
+  ip_range = "{start_ip}-{end_ip}"{desc_line}
 }}
 
 """
                 output.append(resource)
-            
+
             elif addr.type == 'fqdn' and addr.fqdn:
-                # FQDN
-                resource = f"""resource "panos_address_object" "{tf_name}" {{
-  name        = "{name}"
-  value       = "{addr.fqdn}"
-  type        = "fqdn"
-  description = {self._format_comment(addr.comment)}
-  device_group = "{self.device_group}"
+                resource = f"""resource "panos_address" "{tf_name}" {{
+{location}
+
+  name = "{name}"
+  fqdn = "{addr.fqdn}"{desc_line}
 }}
 
 """
                 output.append(resource)
-            
+
             elif addr.type == 'wildcard' and addr.wildcard:
-                # Wildcard (Palo Alto uses ip-wildcard type)
-                resource = f"""resource "panos_address_object" "{tf_name}" {{
+                resource = f"""resource "panos_address" "{tf_name}" {{
+{location}
+
   name        = "{name}"
-  value       = "{addr.wildcard}"
-  type        = "ip-wildcard"
-  description = {self._format_comment(addr.comment)}
-  device_group = "{self.device_group}"
+  ip_wildcard = "{addr.wildcard}"{desc_line}
 }}
 
 """
                 output.append(resource)
-        
+
         return ''.join(output)
     
     def _generate_address_groups(self) -> str:
         """Generate address groups"""
         output = ["# ===== Address Groups =====\n"]
-        
+        location = self._generate_location()
+
         for name, group in self.parser.address_groups.items():
             if not group.members:
                 continue
-            
+
             tf_name = self.sanitize_name(name)
-            
+
             # Format static members
-            members_list = [f'    panos_address_object.{self.sanitize_name(m)}.name'
+            members_list = [f'    panos_address.{self.sanitize_name(m)}.name'
                            for m in group.members]
             members_str = ',\n'.join(members_list)
-            depends_str = ',\n'.join(f'    panos_address_object.{self.sanitize_name(m)}' for m in group.members)
+            depends_str = ',\n'.join(f'    panos_address.{self.sanitize_name(m)}' for m in group.members)
+
+            desc_line = ""
+            if group.comment:
+                desc_line = f"\n  description = {self._format_comment(group.comment)}"
 
             resource = f"""resource "panos_address_group" "{tf_name}" {{
-  name         = "{name}"
-  description  = {self._format_comment(group.comment)}
-  static_value = [
+{location}
+
+  name   = "{name}"{desc_line}
+  static = [
 {members_str}
   ]
-  device_group = "{self.device_group}"
 
   depends_on = [
 {depends_str}
@@ -774,69 +784,76 @@ provider "panos" {
 
 """
             output.append(resource)
-        
+
         return ''.join(output)
     
     def _generate_services(self) -> str:
         """Generate service objects"""
         output = ["# ===== Service Objects =====\n"]
-        
+        location = self._generate_location()
+
         for name, svc in self.parser.services.items():
             tf_name = self.sanitize_name(name)
-            
+
             if svc.protocol in ['TCP', 'UDP']:
                 # TCP/UDP service
                 port_range = svc.tcp_portrange if svc.protocol == 'TCP' else svc.udp_portrange
-                
+
                 if not port_range:
                     continue
-                
+
                 # Convert FortiGate port range format to Palo Alto
-                # FortiGate: "80" or "80-443" or "80:81-443:444"
                 dest_ports = self._convert_port_range(port_range)
-                
-                resource = f"""resource "panos_service_object" "{tf_name}" {{
-  name             = "{name}"
-  protocol         = "{svc.protocol.lower()}"
-  destination_port = "{dest_ports}"
-  description      = {self._format_comment(svc.comment)}
-  device_group     = "{self.device_group}"
+
+                desc_line = ""
+                if svc.comment:
+                    desc_line = f"\n  description = {self._format_comment(svc.comment)}"
+
+                resource = f"""resource "panos_service" "{tf_name}" {{
+{location}
+
+  name = "{name}"{desc_line}
+
+  protocol = {{
+    {svc.protocol.lower()} = {{
+      destination_port = "{dest_ports}"
+    }}
+  }}
 }}
 
 """
                 output.append(resource)
-            
+
             elif svc.protocol in ['ICMP', 'ICMP6']:
-                # ICMP service - Palo Alto doesn't have dedicated ICMP service objects
-                # They use application objects or service groups
-                # For simplicity, create a comment about manual migration needed
                 output.append(f"# MANUAL MIGRATION REQUIRED: {name} (ICMP service)\n")
                 output.append(f"# FortiGate ICMP type: {svc.icmp_type}, code: {svc.icmp_code}\n\n")
-        
+
         return ''.join(output)
     
     def _generate_service_groups(self) -> str:
         """Generate service groups"""
         output = ["# ===== Service Groups =====\n"]
-        
+        location = self._generate_location()
+
         for name, group in self.parser.service_groups.items():
             if not group.members:
                 continue
-            
+
             tf_name = self.sanitize_name(name)
-            
+
             # Format members
-            members_list = [f'    panos_service_object.{self.sanitize_name(m)}.name'
+            members_list = [f'    panos_service.{self.sanitize_name(m)}.name'
                            for m in group.members]
             members_str = ',\n'.join(members_list)
-            depends_str = ',\n'.join(f'    panos_service_object.{self.sanitize_name(m)}' for m in group.members)
+            depends_str = ',\n'.join(f'    panos_service.{self.sanitize_name(m)}' for m in group.members)
 
             resource = f"""resource "panos_service_group" "{tf_name}" {{
-  name        = "{name}"
-  services    = [
+{location}
+
+  name    = "{name}"
+  members = [
 {members_str}
   ]
-  device_group = "{self.device_group}"
 
   depends_on = [
 {depends_str}
@@ -845,7 +862,7 @@ provider "panos" {
 
 """
             output.append(resource)
-        
+
         return ''.join(output)
     
     def _generate_zones(self) -> str:
@@ -885,26 +902,27 @@ provider "panos" {
     def _generate_nat_pools(self) -> str:
         """Generate NAT pool configuration (as dynamic IP and port objects)"""
         output = ["# ===== NAT Pools (Dynamic IP and Port) =====\n"]
-        
+        location = self._generate_location()
+
         for name, pool in self.parser.nat_pools.items():
             tf_name = self.sanitize_name(name)
-            
+
             # Palo Alto uses address objects for NAT pools
             # Create address object for the pool range
             if pool.type == 'overload':
                 # PAT pool - use single IP or range
                 resource = f"""# NAT Pool: {name}
-resource "panos_address_object" "{tf_name}_nat_pool" {{
+resource "panos_address" "{tf_name}_nat_pool" {{
+{location}
+
   name        = "{name}_nat_pool"
-  value       = "{pool.startip}-{pool.endip}"
-  type        = "ip-range"
+  ip_range    = "{pool.startip}-{pool.endip}"
   description = "NAT pool from FortiGate: {pool.comments or name}"
-  device_group = "{self.device_group}"
 }}
 
 """
                 output.append(resource)
-        
+
         return ''.join(output)
     
     def _generate_security_policies(self) -> str:
@@ -932,15 +950,16 @@ resource "panos_address_object" "{tf_name}_nat_pool" {{
     def _generate_security_policy(self, policy: FirewallPolicy) -> str:
         """Generate a single security policy"""
         tf_name = self.sanitize_name(f"policy_{policy.policyid}_{policy.name}")
-        
+        location = self._generate_location()
+
         # Map FortiGate interfaces to Palo Alto zones
         source_zones = [self.zone_mapping.get(intf, intf) for intf in policy.srcintf]
         dest_zones = [self.zone_mapping.get(intf, intf) for intf in policy.dstintf]
-        
+
         # Handle special "all" or "any" addresses
         source_addresses = ['any'] if 'all' in policy.srcaddr else policy.srcaddr
         dest_addresses = ['any'] if 'all' in policy.dstaddr else policy.dstaddr
-        
+
         # Handle special service names
         services = []
         for svc in policy.service:
@@ -952,46 +971,46 @@ resource "panos_address_object" "{tf_name}_nat_pool" {{
                 break
             else:
                 services.append(svc)
-        
+
         if not services:
             services = ['any']
-        
+
         # Determine action
         action = 'allow' if policy.action == 'accept' else 'deny'
-        
+
         # Build source addresses list
         source_addr_refs = []
         for addr in source_addresses:
             if addr != 'any':
-                source_addr_refs.append(f'    panos_address_object.{self.sanitize_name(addr)}.name')
-        
+                source_addr_refs.append(f'    panos_address.{self.sanitize_name(addr)}.name')
+
         source_addresses_str = '["any"]' if not source_addr_refs else '[\n' + ',\n'.join(source_addr_refs) + '\n  ]'
-        
+
         # Build destination addresses list
         dest_addr_refs = []
         for addr in dest_addresses:
             if addr != 'any':
-                dest_addr_refs.append(f'    panos_address_object.{self.sanitize_name(addr)}.name')
-        
+                dest_addr_refs.append(f'    panos_address.{self.sanitize_name(addr)}.name')
+
         dest_addresses_str = '["any"]' if not dest_addr_refs else '[\n' + ',\n'.join(dest_addr_refs) + '\n  ]'
-        
+
         # Build services list
         service_refs = []
         for svc in services:
             if svc != 'any' and svc != 'application-default':
-                service_refs.append(f'    panos_service_object.{self.sanitize_name(svc)}.name')
-        
+                service_refs.append(f'    panos_service.{self.sanitize_name(svc)}.name')
+
         if not service_refs:
             services_str = '["application-default"]'
         else:
             services_str = '[\n' + ',\n'.join(service_refs) + '\n  ]'
-        
+
         # Build depends_on
         depends_on = []
         if self.template:
             for zone in source_zones + dest_zones:
                 depends_on.append(f'    panos_zone.{self.sanitize_name(zone)}')
-        
+
         depends_on_str = ''
         if depends_on:
             depends_items = ',\n'.join(set(depends_on))
@@ -999,7 +1018,7 @@ resource "panos_address_object" "{tf_name}_nat_pool" {{
   depends_on = [
 {depends_items}
   ]"""
-        
+
         # Logging
         log_setting = ""
         if policy.log_traffic_start == 'enable':
@@ -1009,10 +1028,10 @@ resource "panos_address_object" "{tf_name}_nat_pool" {{
         else:
             log_setting = """
   log_end   = true"""
-        
+
         resource = f"""resource "panos_security_rule_group" "{tf_name}" {{
   position_keyword = "bottom"
-  device_group     = "{self.device_group}"
+{location}
 
   rule {{
     name                  = "{policy.name}"
@@ -1051,23 +1070,24 @@ resource "panos_address_object" "{tf_name}_nat_pool" {{
     def _generate_nat_policy(self, policy: FirewallPolicy) -> str:
         """Generate a single NAT policy"""
         tf_name = self.sanitize_name(f"nat_{policy.policyid}_{policy.name}")
-        
+        location = self._generate_location()
+
         # Map interfaces to zones
         source_zones = [self.zone_mapping.get(intf, intf) for intf in policy.srcintf]
         dest_zones = [self.zone_mapping.get(intf, intf) for intf in policy.dstintf]
-        
+
         # Handle addresses
         source_addresses = ['any'] if 'all' in policy.srcaddr else policy.srcaddr
         dest_addresses = ['any'] if 'all' in policy.dstaddr else policy.dstaddr
-        
+
         # Determine NAT type
         if policy.poolname:
             # Dynamic IP and Port (Source NAT with pool)
             pool_name = policy.poolname[0] if policy.poolname else None
-            
+
             resource = f"""resource "panos_nat_rule_group" "{tf_name}" {{
   position_keyword = "bottom"
-  device_group     = "{self.device_group}"
+{location}
 
   rule {{
     name                  = "{policy.name}_nat"
@@ -1096,7 +1116,7 @@ resource "panos_address_object" "{tf_name}_nat_pool" {{
             # Interface-based source NAT
             resource = f"""resource "panos_nat_rule_group" "{tf_name}" {{
   position_keyword = "bottom"
-  device_group     = "{self.device_group}"
+{location}
 
   rule {{
     name                  = "{policy.name}_nat"
@@ -1121,22 +1141,23 @@ resource "panos_address_object" "{tf_name}_nat_pool" {{
 }}
 
 """
-        
+
         return resource
     
     def _generate_vip_nat(self, name: str, vip: VIP) -> str:
         """Generate NAT policy for Virtual IP (destination NAT)"""
         tf_name = self.sanitize_name(f"vip_{name}")
-        
+        location = self._generate_location()
+
         # Determine zone
         dest_zone = self.zone_mapping.get(vip.extintf, vip.extintf) if vip.extintf != 'any' else 'any'
-        
+
         # Port forwarding or static NAT
         if vip.portforward == 'enable' and vip.protocol and vip.extport and vip.mappedport:
             # Port forwarding (destination NAT with port translation)
             resource = f"""resource "panos_nat_rule_group" "{tf_name}" {{
   position_keyword = "bottom"
-  device_group     = "{self.device_group}"
+{location}
 
   rule {{
     name = "{name}_dnat"
@@ -1166,7 +1187,7 @@ resource "panos_address_object" "{tf_name}_nat_pool" {{
             # Static NAT (1:1 NAT)
             resource = f"""resource "panos_nat_rule_group" "{tf_name}" {{
   position_keyword = "bottom"
-  device_group     = "{self.device_group}"
+{location}
 
   rule {{
     name = "{name}_static_nat"
@@ -1189,7 +1210,7 @@ resource "panos_address_object" "{tf_name}_nat_pool" {{
 }}
 
 """
-        
+
         return resource
     
     def _generate_static_routes(self) -> str:
@@ -1430,6 +1451,4 @@ Environment Variables:
 
 
 if __name__ == '__main__':
-    import os
-    import re
     main()
