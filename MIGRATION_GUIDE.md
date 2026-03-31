@@ -56,15 +56,15 @@ These items are converted directly into Terraform resources and will be created 
 
 | FortiGate | Palo Alto Equivalent | Terraform Resource |
 |-----------|---------------------|--------------------|
-| Address objects (IP, range, FQDN, wildcard) | Address objects | `panos_address_object` |
+| Address objects (IP, range, FQDN, wildcard) | Address objects | `panos_address` |
 | Address groups | Address groups | `panos_address_group` |
-| Service objects (TCP/UDP) | Service objects | `panos_service_object` |
+| Service objects (TCP/UDP) | Service objects | `panos_service` |
 | Service groups | Service groups | `panos_service_group` |
-| Firewall policies (allow/deny) | Security rules | `panos_security_rule_group` |
-| NAT with IP pools (source NAT) | NAT rules | `panos_nat_rule_group` |
-| Virtual IPs (destination NAT / port forwarding) | NAT rules | `panos_nat_rule_group` |
-| IP pools | Address objects (ip-range) | `panos_address_object` |
-| Static routes | Static routes | `panos_static_route_ipv4` |
+| Firewall policies (allow/deny) | Security rules | `panos_security_policy_rules` |
+| NAT with IP pools (source NAT) | NAT rules | `panos_nat_policy_rules` |
+| Virtual IPs (destination NAT / port forwarding) | NAT rules | `panos_nat_policy_rules` |
+| IP pools | Address objects (ip-range) | `panos_address` |
+| Static routes | Static routes | `panos_virtual_router_static_route_ipv4` |
 | Zones | Zones | `panos_zone` |
 
 ### Guided Manual (~15%)
@@ -358,7 +358,7 @@ palo_alto.tf
 **Example: An address object in the Terraform file:**
 
 ```hcl
-resource "panos_address_object" "web_server_1" {
+resource "panos_address" "web_server_1" {
   name         = "web_server_1"
   value        = "10.0.1.50/32"
   type         = "ip-netmask"
@@ -540,8 +540,8 @@ This connects to your Palo Alto, compares the desired state (your `.tf` file) wi
 **Review the output carefully.** You will see entries like:
 
 ```
-  # panos_address_object.web_server_1 will be created
-  + resource "panos_address_object" "web_server_1" {
+  # panos_address.web_server_1 will be created
+  + resource "panos_address" "web_server_1" {
       + name         = "web_server_1"
       + value        = "10.0.1.50/32"
       + type         = "ip-netmask"
@@ -607,10 +607,10 @@ Terraform will create each resource in order, respecting dependencies (e.g., add
 
 You will see output like:
 ```
-panos_address_object.web_server_1: Creating...
-panos_address_object.web_server_1: Creation complete after 2s
-panos_address_object.db_server_1: Creating...
-panos_address_object.db_server_1: Creation complete after 1s
+panos_address.web_server_1: Creating...
+panos_address.web_server_1: Creation complete after 2s
+panos_address.db_server_1: Creating...
+panos_address.db_server_1: Creation complete after 1s
 ...
 Apply complete! Resources: 247 added, 0 changed, 0 destroyed.
 ```
@@ -936,7 +936,7 @@ The endpoint does not exist on your FortiOS version. The script handles this gra
 The object already exists on the Palo Alto with a different configuration. Options:
 - Delete the conflicting object from the Palo Alto and re-run `terraform apply`
 - Remove the resource from the `.tf` file if you want to keep the existing object
-- Import the existing object: `terraform import panos_address_object.web_server_1 shared:web_server_1`
+- Import the existing object: `terraform import panos_address.web_server_1 shared:web_server_1`
 
 **`Error: Object not found`**
 
@@ -1015,7 +1015,7 @@ terraform destroy   # Remove all created objects (rollback)
 ### Reading a .tf File
 
 ```hcl
-resource "panos_address_object" "web_server" {
+resource "panos_address" "web_server" {
   name         = "web_server"        # Object name on Palo Alto
   value        = "10.0.1.50/32"      # The IP address
   type         = "ip-netmask"        # Address type
@@ -1025,7 +1025,7 @@ resource "panos_address_object" "web_server" {
 ```
 
 - `resource` = "I want to create this thing"
-- `"panos_address_object"` = the type of object (address, service, policy, etc.)
+- `"panos_address"` = the type of object (address, service, policy, etc.)
 - `"web_server"` = Terraform's internal name for tracking (not visible on the Palo Alto)
 - Everything inside `{ }` = the object's properties
 

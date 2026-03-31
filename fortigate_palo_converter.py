@@ -869,34 +869,42 @@ provider "panos" {
         """Generate zone configuration"""
         output = ["# ===== Zones =====\n"]
         output.append("# Note: Review zone-to-interface mappings\n\n")
-        
+
         # Create zones from FortiGate zones or interfaces
         zones_to_create = set()
-        
+
         # From explicit zones
         for zone_name, members in self.parser.zones.items():
             zones_to_create.add(zone_name)
             self.zone_mapping[zone_name] = zone_name
-        
+
         # From policies (extract unique interface names)
         for policy in self.parser.policies:
             for intf in policy.srcintf + policy.dstintf:
                 if intf not in self.zone_mapping:
                     zones_to_create.add(intf)
                     self.zone_mapping[intf] = intf
-        
+
         for zone_name in sorted(zones_to_create):
             tf_name = self.sanitize_name(zone_name)
-            
+
             resource = f"""resource "panos_zone" "{tf_name}" {{
-  name     = "{zone_name}"
-  mode     = "layer3"
-  template = "{self.template}"
+  location = {{
+    template = {{
+      name = "{self.template}"
+    }}
+  }}
+
+  name = "{zone_name}"
+
+  network = {{
+    layer3 = []
+  }}
 }}
 
 """
             output.append(resource)
-        
+
         return ''.join(output)
     
     def _generate_nat_pools(self) -> str:
@@ -1023,17 +1031,20 @@ resource "panos_address" "{tf_name}_nat_pool" {{
         log_setting = ""
         if policy.log_traffic_start == 'enable':
             log_setting = """
-  log_start = true
-  log_end   = true"""
+    log_start = true
+    log_end   = true"""
         else:
             log_setting = """
-  log_end   = true"""
+    log_end   = true"""
 
-        resource = f"""resource "panos_security_rule_group" "{tf_name}" {{
-  position_keyword = "bottom"
+        resource = f"""resource "panos_security_policy_rules" "{tf_name}" {{
 {location}
 
-  rule {{
+  position = {{
+    where = "bottom"
+  }}
+
+  rules = [{{
     name                  = "{policy.name}"
     source_zones          = {json.dumps(source_zones)}
     source_addresses      = {source_addresses_str}
@@ -1041,10 +1052,10 @@ resource "panos_address" "{tf_name}_nat_pool" {{
     destination_addresses = {dest_addresses_str}
     applications          = ["any"]
     services              = {services_str}
-    categories            = ["any"]
+    category              = ["any"]
     action                = "{action}"{log_setting}
     description           = {self._format_comment(policy.comments)}
-  }}{depends_on_str}
+  }}]{depends_on_str}
 }}
 
 """
@@ -1085,59 +1096,55 @@ resource "panos_address" "{tf_name}_nat_pool" {{
             # Dynamic IP and Port (Source NAT with pool)
             pool_name = policy.poolname[0] if policy.poolname else None
 
-            resource = f"""resource "panos_nat_rule_group" "{tf_name}" {{
-  position_keyword = "bottom"
+            resource = f"""resource "panos_nat_policy_rules" "{tf_name}" {{
 {location}
 
-  rule {{
+  position = {{
+    where = "bottom"
+  }}
+
+  rules = [{{
     name                  = "{policy.name}_nat"
-    original_packet {{
-      source_zones          = {json.dumps(source_zones)}
-      destination_zone      = "{dest_zones[0] if dest_zones else 'any'}"
-      source_addresses      = {json.dumps(source_addresses)}
-      destination_addresses = {json.dumps(dest_addresses)}
-    }}
-    translated_packet {{
-      source {{
-        dynamic_ip_and_port {{
-          interface_address {{
-            interface = "{dest_zones[0] if dest_zones else 'ethernet1/1'}"
-          }}
+    source_zones          = {json.dumps(source_zones)}
+    destination_zone      = {json.dumps(dest_zones[:1] if dest_zones else ['any'])}
+    source_addresses      = {json.dumps(source_addresses)}
+    destination_addresses = {json.dumps(dest_addresses)}
+    source_translation = {{
+      dynamic_ip_and_port = {{
+        interface_address = {{
+          interface = "{dest_zones[0] if dest_zones else 'ethernet1/1'}"
         }}
       }}
-      destination {{}}
     }}
     description = {self._format_comment(policy.comments)}
-  }}
+  }}]
 }}
 
 """
         else:
             # Interface-based source NAT
-            resource = f"""resource "panos_nat_rule_group" "{tf_name}" {{
-  position_keyword = "bottom"
+            resource = f"""resource "panos_nat_policy_rules" "{tf_name}" {{
 {location}
 
-  rule {{
+  position = {{
+    where = "bottom"
+  }}
+
+  rules = [{{
     name                  = "{policy.name}_nat"
-    original_packet {{
-      source_zones          = {json.dumps(source_zones)}
-      destination_zone      = "{dest_zones[0] if dest_zones else 'any'}"
-      source_addresses      = {json.dumps(source_addresses)}
-      destination_addresses = {json.dumps(dest_addresses)}
-    }}
-    translated_packet {{
-      source {{
-        dynamic_ip_and_port {{
-          interface_address {{
-            interface = "{dest_zones[0] if dest_zones else 'ethernet1/1'}"
-          }}
+    source_zones          = {json.dumps(source_zones)}
+    destination_zone      = {json.dumps(dest_zones[:1] if dest_zones else ['any'])}
+    source_addresses      = {json.dumps(source_addresses)}
+    destination_addresses = {json.dumps(dest_addresses)}
+    source_translation = {{
+      dynamic_ip_and_port = {{
+        interface_address = {{
+          interface = "{dest_zones[0] if dest_zones else 'ethernet1/1'}"
         }}
       }}
-      destination {{}}
     }}
     description = {self._format_comment(policy.comments)}
-  }}
+  }}]
 }}
 
 """
@@ -1155,58 +1162,49 @@ resource "panos_address" "{tf_name}_nat_pool" {{
         # Port forwarding or static NAT
         if vip.portforward == 'enable' and vip.protocol and vip.extport and vip.mappedport:
             # Port forwarding (destination NAT with port translation)
-            resource = f"""resource "panos_nat_rule_group" "{tf_name}" {{
-  position_keyword = "bottom"
+            resource = f"""resource "panos_nat_policy_rules" "{tf_name}" {{
 {location}
 
-  rule {{
-    name = "{name}_dnat"
-    original_packet {{
-      source_zones          = ["any"]
-      destination_zone      = "{dest_zone}"
-      destination_interface = "any"
-      source_addresses      = ["any"]
-      destination_addresses = ["{vip.extip}"]
-      service               = "service-tcp-{vip.extport}"
-    }}
-    translated_packet {{
-      source {{}}
-      destination {{
-        static_translation {{
-          address = "{vip.mappedip}"
-          port    = {vip.mappedport}
-        }}
-      }}
+  position = {{
+    where = "bottom"
+  }}
+
+  rules = [{{
+    name                  = "{name}_dnat"
+    source_zones          = ["any"]
+    destination_zone      = ["{dest_zone}"]
+    source_addresses      = ["any"]
+    destination_addresses = ["{vip.extip}"]
+    service               = "service-tcp-{vip.extport}"
+    destination_translation = {{
+      translated_address = "{vip.mappedip}"
+      translated_port    = {vip.mappedport}
     }}
     description = {self._format_comment(vip.comment)}
-  }}
+  }}]
 }}
 
 """
         else:
             # Static NAT (1:1 NAT)
-            resource = f"""resource "panos_nat_rule_group" "{tf_name}" {{
-  position_keyword = "bottom"
+            resource = f"""resource "panos_nat_policy_rules" "{tf_name}" {{
 {location}
 
-  rule {{
-    name = "{name}_static_nat"
-    original_packet {{
-      source_zones          = ["any"]
-      destination_zone      = "{dest_zone}"
-      source_addresses      = ["any"]
-      destination_addresses = ["{vip.extip}"]
-    }}
-    translated_packet {{
-      source {{}}
-      destination {{
-        static_translation {{
-          address = "{vip.mappedip}"
-        }}
-      }}
+  position = {{
+    where = "bottom"
+  }}
+
+  rules = [{{
+    name                  = "{name}_static_nat"
+    source_zones          = ["any"]
+    destination_zone      = ["{dest_zone}"]
+    source_addresses      = ["any"]
+    destination_addresses = ["{vip.extip}"]
+    destination_translation = {{
+      translated_address = "{vip.mappedip}"
     }}
     description = {self._format_comment(vip.comment)}
-  }}
+  }}]
 }}
 
 """
@@ -1217,37 +1215,49 @@ resource "panos_address" "{tf_name}_nat_pool" {{
         """Generate static routes"""
         if not self.template:
             return ""
-        
+
         output = ["# ===== Static Routes =====\n"]
-        output.append(f"# Note: Static routes require template configuration\n\n")
-        
+        output.append("# Note: Static routes require template configuration\n\n")
+
         # Create virtual router first (typically default)
-        output.append("""resource "panos_virtual_router" "default" {
-  name     = "default"
-  template = \"" + self.template + "\"
-}
+        output.append(f"""resource "panos_virtual_router" "default" {{
+  location = {{
+    template = {{
+      name = "{self.template}"
+    }}
+  }}
+
+  name = "default"
+}}
 
 """)
-        
+
         for route in self.parser.static_routes:
             tf_name = self.sanitize_name(f"route_{route.seq_num}_{route.dst.replace('/', '_')}")
-            
+
             # Parse destination
             dest = route.dst if route.dst else "0.0.0.0/0"
-            
-            resource = f"""resource "panos_static_route_ipv4" "{tf_name}" {{
-  name           = "route_{route.seq_num}"
+
+            resource = f"""resource "panos_virtual_router_static_route_ipv4" "{tf_name}" {{
+  location = {{
+    template = {{
+      name = "{self.template}"
+    }}
+  }}
+
   virtual_router = panos_virtual_router.default.name
+  name           = "route_{route.seq_num}"
   destination    = "{dest}"
   interface      = "{route.device}"
-  next_hop       = "{route.gateway}"
+  nexthop = {{
+    ip_address = "{route.gateway}"
+  }}
   metric         = {route.distance}
-  template       = "{self.template}"
 }}
 
 """
             output.append(resource)
-        
+
         return ''.join(output)
     
     def _convert_port_range(self, port_range: str) -> str:
