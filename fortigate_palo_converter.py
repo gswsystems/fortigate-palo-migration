@@ -783,6 +783,7 @@ class TerraformGenerator:
         self.vsys = vsys
         self.template = template
         self.generated_objects: Set[str] = set()
+        self.generated_services: Set[str] = set()  # Track services that got a panos_service resource
         self.zone_mapping: Dict[str, str] = {}
         
     def sanitize_name(self, name: str) -> str:
@@ -1023,6 +1024,7 @@ provider "panos" {
 
 """
                     output.append(resource)
+                    self.generated_services.add(svc_name)
 
             elif svc.protocol in ['ICMP', 'ICMP6']:
                 output.append(f"# MANUAL MIGRATION REQUIRED: {name} (ICMP service)\n")
@@ -1041,16 +1043,44 @@ provider "panos" {
 
             tf_name = self.sanitize_name(name)
 
-            # Format members
-            members_list = [f'    panos_service.{self.sanitize_name(m)}.name'
-                           for m in group.members]
+            # Separate members into services, service groups, and skipped (e.g. ICMP)
+            svc_members = []
+            grp_members = []
+            skipped_members = []
+            for m in group.members:
+                if m in self.parser.service_groups:
+                    grp_members.append(m)
+                elif m in self.generated_services:
+                    svc_members.append(m)
+                else:
+                    skipped_members.append(m)
+
+            if not svc_members and not grp_members:
+                output.append(f"# SKIPPED: Service group {name} - all members are ICMP or unsupported\n")
+                output.append(f"# Members: {', '.join(group.members)}\n\n")
+                continue
+
+            # Build member references
+            members_list = []
+            depends_list = []
+            for m in svc_members:
+                members_list.append(f'    panos_service.{self.sanitize_name(m)}.name')
+                depends_list.append(f'    panos_service.{self.sanitize_name(m)}')
+            for m in grp_members:
+                members_list.append(f'    panos_service_group.{self.sanitize_name(m)}.name')
+                depends_list.append(f'    panos_service_group.{self.sanitize_name(m)}')
+
             members_str = ',\n'.join(members_list)
-            depends_str = ',\n'.join(f'    panos_service.{self.sanitize_name(m)}' for m in group.members)
+            depends_str = ',\n'.join(depends_list)
+
+            skipped_comment = ""
+            if skipped_members:
+                skipped_comment = f"\n  # NOTE: Skipped ICMP/unsupported members: {', '.join(skipped_members)}"
 
             resource = f"""resource "panos_service_group" "{tf_name}" {{
 {location}
 
-  name    = "{name}"
+  name    = "{name}"{skipped_comment}
   members = [
 {members_str}
   ]
