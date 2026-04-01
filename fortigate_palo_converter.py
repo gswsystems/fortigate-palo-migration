@@ -203,10 +203,20 @@ class FortiGateAPI:
         """Get all firewall addresses"""
         result = self.get('cmdb/firewall/address')
         return result.get('results', [])
-    
+
+    def get_ipv6_addresses(self) -> List[dict]:
+        """Get all IPv6 firewall addresses"""
+        result = self.get('cmdb/firewall/address6')
+        return result.get('results', [])
+
     def get_address_groups(self) -> List[dict]:
         """Get all firewall address groups"""
         result = self.get('cmdb/firewall/addrgrp')
+        return result.get('results', [])
+
+    def get_ipv6_address_groups(self) -> List[dict]:
+        """Get all IPv6 firewall address groups"""
+        result = self.get('cmdb/firewall/addrgrp6')
         return result.get('results', [])
     
     def get_services(self) -> List[dict]:
@@ -248,6 +258,11 @@ class FortiGateAPI:
         """Get all static routes"""
         result = self.get('cmdb/router/static')
         return result.get('results', [])
+
+    def get_ipv6_static_routes(self) -> List[dict]:
+        """Get all IPv6 static routes"""
+        result = self.get('cmdb/router/static6')
+        return result.get('results', [])
     
     def get_interfaces(self) -> List[dict]:
         """Get all interfaces"""
@@ -274,6 +289,7 @@ class FortiGateParser:
         self.vips: Dict[str, VIP] = {}
         self.vip_groups: Dict[str, List[str]] = {}
         self.static_routes: List[StaticRoute] = []
+        self.ipv6_static_routes: List[StaticRoute] = []
         self.interfaces: Dict[str, Interface] = {}
         self.zones: Dict[str, List[str]] = {}
         
@@ -281,14 +297,18 @@ class FortiGateParser:
         """Main parsing function"""
         print("Fetching configuration from FortiGate...")
         self._parse_addresses()
+        self._parse_ipv6_addresses()
         self._parse_address_groups()
+        self._parse_ipv6_address_groups()
         self._parse_services()
         self._parse_service_groups()
         self._parse_nat_pools()
         self._parse_vips()
         self._parse_vip_groups()
         self._parse_policies()
+        self._parse_ipv6_policies()
         self._parse_static_routes()
+        self._parse_ipv6_static_routes()
         self._parse_interfaces()
         self._parse_zones()
         print("Configuration fetched successfully")
@@ -340,7 +360,58 @@ class FortiGateParser:
             self.addresses[name] = addr
         
         print(f"    Found {len(self.addresses)} addresses")
-    
+
+    def _parse_ipv6_addresses(self):
+        """Parse IPv6 address objects from API"""
+        print("  - Fetching IPv6 addresses...")
+        try:
+            addresses_data = self.api.get_ipv6_addresses()
+        except Exception:
+            print("    IPv6 addresses not available (may not be supported on this firmware)")
+            return
+
+        count = 0
+        for addr_data in addresses_data:
+            name = addr_data.get('name', '')
+            if name in self.addresses:
+                continue  # IPv4 version already exists with same name
+            addr_type = addr_data.get('type', 'ipprefix')
+
+            addr = AddressObject(
+                name=name,
+                type=addr_type,
+                comment=addr_data.get('comment'),
+                interface=addr_data.get('associated-interface'),
+                uuid=addr_data.get('uuid')
+            )
+
+            if addr_type == 'ipprefix':
+                # FortiGate address6 uses 'ip6' field with prefix notation (e.g. "2001:db8::/32")
+                ip6 = addr_data.get('ip6', '')
+                if ip6:
+                    try:
+                        network = ipaddress.ip_network(ip6, strict=False)
+                        addr.subnet = str(network)
+                        addr.type = 'ipmask'  # Normalize for generator
+                    except Exception:
+                        addr.subnet = ip6
+                        addr.type = 'ipmask'
+
+            elif addr_type == 'iprange':
+                addr.ip_range = (
+                    addr_data.get('start-ip'),
+                    addr_data.get('end-ip')
+                )
+
+            elif addr_type == 'fqdn':
+                addr.fqdn = addr_data.get('fqdn')
+
+            if addr.subnet or addr.ip_range or addr.fqdn:
+                self.addresses[name] = addr
+                count += 1
+
+        print(f"    Found {count} IPv6 addresses")
+
     def _parse_address_groups(self):
         """Parse address groups from API"""
         print("  - Fetching address groups...")
@@ -362,7 +433,37 @@ class FortiGateParser:
             self.address_groups[name] = group
         
         print(f"    Found {len(self.address_groups)} address groups")
-    
+
+    def _parse_ipv6_address_groups(self):
+        """Parse IPv6 address groups from API"""
+        print("  - Fetching IPv6 address groups...")
+        try:
+            groups_data = self.api.get_ipv6_address_groups()
+        except Exception:
+            print("    IPv6 address groups not available (may not be supported on this firmware)")
+            return
+
+        count = 0
+        for group_data in groups_data:
+            name = group_data.get('name', '')
+            if name in self.address_groups:
+                continue  # IPv4 version already exists with same name
+
+            group = AddressObject(
+                name=name,
+                type='group',
+                comment=group_data.get('comment'),
+                uuid=group_data.get('uuid')
+            )
+
+            members = group_data.get('member', [])
+            group.members = [m.get('name') for m in members if isinstance(m, dict)]
+
+            self.address_groups[name] = group
+            count += 1
+
+        print(f"    Found {count} IPv6 address groups")
+
     def _parse_services(self):
         """Parse service objects from API"""
         print("  - Fetching services...")
@@ -532,7 +633,66 @@ class FortiGateParser:
             self.policies.append(policy)
         
         print(f"    Found {len(self.policies)} policies")
-    
+
+    def _parse_ipv6_policies(self):
+        """Parse IPv6 firewall policies from API"""
+        print("  - Fetching IPv6 firewall policies...")
+        try:
+            policies_data = self.api.get_ipv6_policies()
+        except Exception:
+            print("    IPv6 policies not available (may not be supported on this firmware)")
+            return
+
+        count = 0
+        for pol_data in policies_data:
+            policyid = str(pol_data.get('policyid', ''))
+
+            policy = FirewallPolicy(
+                policyid=f"v6_{policyid}",
+                name=pol_data.get('name', f"policy6_{policyid}"),
+                srcintf=[],
+                dstintf=[],
+                srcaddr=[],
+                dstaddr=[],
+                service=[],
+                action=pol_data.get('action', 'accept'),
+                schedule=pol_data.get('schedule', 'always'),
+                status=pol_data.get('status', 'enable'),
+                nat=pol_data.get('nat', 'disable'),
+                ippool=pol_data.get('ippool', 'disable'),
+                comments=pol_data.get('comments'),
+                logtraffic=pol_data.get('logtraffic', 'utm'),
+                log_traffic_start=pol_data.get('logtraffic-start', 'disable'),
+                uuid=pol_data.get('uuid')
+            )
+
+            # Parse interfaces
+            srcintf = pol_data.get('srcintf', [])
+            policy.srcintf = [i.get('name') for i in srcintf if isinstance(i, dict)]
+
+            dstintf = pol_data.get('dstintf', [])
+            policy.dstintf = [i.get('name') for i in dstintf if isinstance(i, dict)]
+
+            # Parse addresses (IPv6 policies use srcaddr/dstaddr same as IPv4)
+            srcaddr = pol_data.get('srcaddr', [])
+            policy.srcaddr = [a.get('name') for a in srcaddr if isinstance(a, dict)]
+
+            dstaddr = pol_data.get('dstaddr', [])
+            policy.dstaddr = [a.get('name') for a in dstaddr if isinstance(a, dict)]
+
+            # Parse services
+            service = pol_data.get('service', [])
+            policy.service = [s.get('name') for s in service if isinstance(s, dict)]
+
+            # Parse NAT pools
+            poolname = pol_data.get('poolname', [])
+            policy.poolname = [p.get('name') for p in poolname if isinstance(p, dict)]
+
+            self.policies.append(policy)
+            count += 1
+
+        print(f"    Found {count} IPv6 policies")
+
     def _parse_static_routes(self):
         """Parse static routes from API"""
         print("  - Fetching static routes...")
@@ -552,7 +712,30 @@ class FortiGateParser:
             self.static_routes.append(route)
         
         print(f"    Found {len(self.static_routes)} static routes")
-    
+
+    def _parse_ipv6_static_routes(self):
+        """Parse IPv6 static routes from API"""
+        print("  - Fetching IPv6 static routes...")
+        try:
+            routes_data = self.api.get_ipv6_static_routes()
+        except Exception:
+            print("    IPv6 static routes not available (may not be supported on this firmware)")
+            return
+
+        for route_data in routes_data:
+            route = StaticRoute(
+                seq_num=str(route_data.get('seq-num', '0')),
+                dst=route_data.get('dst', '::/0'),
+                gateway=route_data.get('gateway', ''),
+                device=route_data.get('device', ''),
+                distance=route_data.get('distance', 10),
+                priority=route_data.get('priority', 0),
+                comment=route_data.get('comment')
+            )
+            self.ipv6_static_routes.append(route)
+
+        print(f"    Found {len(self.ipv6_static_routes)} IPv6 static routes")
+
     def _parse_interfaces(self):
         """Parse interfaces from API"""
         print("  - Fetching interfaces...")
@@ -649,7 +832,8 @@ class TerraformGenerator:
         # Static routes (if using template)
         if self.template:
             output.append(self._generate_static_routes())
-        
+            output.append(self._generate_ipv6_static_routes())
+
         return '\n'.join(output)
     
     def _generate_header(self) -> str:
@@ -795,34 +979,50 @@ provider "panos" {
         for name, svc in self.parser.services.items():
             tf_name = self.sanitize_name(name)
 
-            if svc.protocol in ['TCP', 'UDP']:
-                # TCP/UDP service
-                port_range = svc.tcp_portrange if svc.protocol == 'TCP' else svc.udp_portrange
+            if svc.protocol in ['TCP', 'UDP', 'TCP/UDP/SCTP']:
+                # Build list of (proto, port_range) pairs to generate
+                proto_ports = []
+                if svc.protocol == 'TCP':
+                    if svc.tcp_portrange:
+                        proto_ports.append(('tcp', svc.tcp_portrange, name, tf_name))
+                elif svc.protocol == 'UDP':
+                    if svc.udp_portrange:
+                        proto_ports.append(('udp', svc.udp_portrange, name, tf_name))
+                else:
+                    # TCP/UDP/SCTP: generate both if both port ranges exist
+                    if svc.tcp_portrange:
+                        proto_ports.append(('tcp', svc.tcp_portrange, name, tf_name))
+                    if svc.udp_portrange:
+                        if svc.tcp_portrange:
+                            # Both exist - suffix the UDP variant
+                            proto_ports.append(('udp', svc.udp_portrange,
+                                                f"{name}_UDP", f"{tf_name}_UDP"))
+                        else:
+                            proto_ports.append(('udp', svc.udp_portrange, name, tf_name))
 
-                if not port_range:
-                    continue
+                for proto, port_range, svc_name, svc_tf_name in proto_ports:
+                    dest_ports = self._convert_port_range(port_range)
+                    if not dest_ports:
+                        continue
 
-                # Convert FortiGate port range format to Palo Alto
-                dest_ports = self._convert_port_range(port_range)
+                    desc_line = ""
+                    if svc.comment:
+                        desc_line = f"\n  description = {self._format_comment(svc.comment)}"
 
-                desc_line = ""
-                if svc.comment:
-                    desc_line = f"\n  description = {self._format_comment(svc.comment)}"
-
-                resource = f"""resource "panos_service" "{tf_name}" {{
+                    resource = f"""resource "panos_service" "{svc_tf_name}" {{
 {location}
 
-  name = "{name}"{desc_line}
+  name = "{svc_name}"{desc_line}
 
   protocol = {{
-    {svc.protocol.lower()} = {{
+    {proto} = {{
       destination_port = "{dest_ports}"
     }}
   }}
 }}
 
 """
-                output.append(resource)
+                    output.append(resource)
 
             elif svc.protocol in ['ICMP', 'ICMP6']:
                 output.append(f"# MANUAL MIGRATION REQUIRED: {name} (ICMP service)\n")
@@ -925,7 +1125,7 @@ resource "panos_address" "{tf_name}_nat_pool" {{
 
   name        = "{name}_nat_pool"
   ip_range    = "{pool.startip}-{pool.endip}"
-  description = "NAT pool from FortiGate: {pool.comments or name}"
+  description = {self._format_comment(f"NAT pool from FortiGate: {pool.comments or name}")}
 }}
 
 """
@@ -1037,11 +1237,39 @@ resource "panos_address" "{tf_name}_nat_pool" {{
             log_setting = """
     log_end   = true"""
 
+        # Security profiles
+        profile_setting_str = ""
+        if policy.profile_group:
+            profile_setting_str = f"""
+    profile_setting = {{
+      group = ["{policy.profile_group}"]
+    }}"""
+        else:
+            profiles = {}
+            if policy.av_profile:
+                profiles['virus'] = policy.av_profile
+            if policy.ips_sensor:
+                profiles['vulnerability'] = policy.ips_sensor
+            if policy.webfilter_profile:
+                profiles['url_filtering'] = policy.webfilter_profile
+            if policy.application_list:
+                profiles['spyware'] = policy.application_list
+            if profiles:
+                profile_lines = ',\n'.join(
+                    f'        {k} = ["{v}"]' for k, v in profiles.items()
+                )
+                profile_setting_str = f"""
+    profile_setting = {{
+      profiles = {{
+{profile_lines}
+      }}
+    }}"""
+
         resource = f"""resource "panos_security_policy_rules" "{tf_name}" {{
 {location}
 
   position = {{
-    where = "bottom"
+    where = "last"
   }}
 
   rules = [{{
@@ -1053,7 +1281,7 @@ resource "panos_address" "{tf_name}_nat_pool" {{
     applications          = ["any"]
     services              = {services_str}
     category              = ["any"]
-    action                = "{action}"{log_setting}
+    action                = "{action}"{log_setting}{profile_setting_str}
     description           = {self._format_comment(policy.comments)}
   }}]{depends_on_str}
 }}
@@ -1100,7 +1328,7 @@ resource "panos_address" "{tf_name}_nat_pool" {{
 {location}
 
   position = {{
-    where = "bottom"
+    where = "last"
   }}
 
   rules = [{{
@@ -1127,7 +1355,7 @@ resource "panos_address" "{tf_name}_nat_pool" {{
 {location}
 
   position = {{
-    where = "bottom"
+    where = "last"
   }}
 
   rules = [{{
@@ -1166,7 +1394,7 @@ resource "panos_address" "{tf_name}_nat_pool" {{
 {location}
 
   position = {{
-    where = "bottom"
+    where = "last"
   }}
 
   rules = [{{
@@ -1191,7 +1419,7 @@ resource "panos_address" "{tf_name}_nat_pool" {{
 {location}
 
   position = {{
-    where = "bottom"
+    where = "last"
   }}
 
   rules = [{{
@@ -1259,31 +1487,66 @@ resource "panos_address" "{tf_name}_nat_pool" {{
             output.append(resource)
 
         return ''.join(output)
-    
+
+    def _generate_ipv6_static_routes(self) -> str:
+        """Generate IPv6 static routes"""
+        if not self.template or not self.parser.ipv6_static_routes:
+            return ""
+
+        output = ["# ===== IPv6 Static Routes =====\n"]
+
+        for route in self.parser.ipv6_static_routes:
+            tf_name = self.sanitize_name(f"route6_{route.seq_num}_{route.dst.replace('/', '_').replace(':', '_')}")
+            dest = route.dst if route.dst else "::/0"
+
+            resource = f"""resource "panos_virtual_router_static_route_ipv6" "{tf_name}" {{
+  location = {{
+    template = {{
+      name = "{self.template}"
+    }}
+  }}
+
+  virtual_router = panos_virtual_router.default.name
+  name           = "route6_{route.seq_num}"
+  destination    = "{dest}"
+  interface      = "{route.device}"
+  nexthop = {{
+    ipv6_address = "{route.gateway}"
+  }}
+  metric         = {route.distance}
+}}
+
+"""
+            output.append(resource)
+
+        return ''.join(output)
+
     def _convert_port_range(self, port_range: str) -> str:
-        """Convert FortiGate port range to Palo Alto format"""
-        # FortiGate format: "80" or "80-443" or "80:81-443:444"
-        # Palo Alto format: "80" or "80-443" or "80,81,443,444"
-        
+        """Convert FortiGate port range to Palo Alto format.
+
+        FortiGate formats (space-separated entries, each can be):
+          - "80"              single dest port
+          - "80-443"          dest port range
+          - "80:0"            dest_port:source_port (source ignored for panos)
+          - "80-443:0-65535"  dest_range:source_range
+
+        Palo Alto format: comma-separated ports/ranges, e.g. "80,443,8000-8080"
+        """
         if not port_range:
             return ""
-        
-        # Simple port or range
-        if '-' in port_range and ':' not in port_range:
-            return port_range
-        
-        # Single port
-        if ':' not in port_range and '-' not in port_range:
-            return port_range
-        
-        # Complex range with colons - convert to comma-separated
-        # This is a simplified conversion
-        parts = port_range.replace(':', ',').split('-')
-        if len(parts) > 1:
-            # Return first range for simplicity
-            return f"{parts[0]}-{parts[1]}"
-        
-        return port_range
+
+        result_parts = []
+        for entry in port_range.strip().split():
+            # Split off source port if present (dest:source or dest-range:source-range)
+            if ':' in entry:
+                dest_part = entry.split(':')[0]
+            else:
+                dest_part = entry
+            # dest_part is now "80" or "80-443"
+            if dest_part:
+                result_parts.append(dest_part)
+
+        return ','.join(result_parts)
     
     def _format_comment(self, comment: Optional[str]) -> str:
         """Format comment for Terraform"""
