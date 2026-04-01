@@ -1234,14 +1234,25 @@ resource "panos_address" "{tf_name}_nat_pool" {{
 
         # Build services list
         service_refs = []
+        skipped_svcs = []
         for svc in services:
-            if svc != 'any' and svc != 'application-default':
+            if svc in ('any', 'application-default'):
+                continue
+            if svc in self.generated_services:
                 service_refs.append(f'    panos_service.{self.sanitize_name(svc)}.name')
+            elif svc in self.parser.service_groups:
+                service_refs.append(f'    panos_service_group.{self.sanitize_name(svc)}.name')
+            else:
+                skipped_svcs.append(svc)
 
         if not service_refs:
             services_str = '["application-default"]'
         else:
             services_str = '[\n' + ',\n'.join(service_refs) + '\n  ]'
+
+        skipped_svc_comment = ""
+        if skipped_svcs:
+            skipped_svc_comment = f"\n    # NOTE: ICMP/unsupported services removed (handle via application): {', '.join(skipped_svcs)}"
 
         # Build depends_on
         depends_on = []
@@ -1309,7 +1320,7 @@ resource "panos_address" "{tf_name}_nat_pool" {{
     destination_zones     = {json.dumps(dest_zones)}
     destination_addresses = {dest_addresses_str}
     applications          = ["any"]
-    services              = {services_str}
+    services              = {services_str}{skipped_svc_comment}
     category              = ["any"]
     action                = "{action}"{log_setting}{profile_setting_str}
     description           = {self._format_comment(policy.comments)}
