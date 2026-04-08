@@ -67,7 +67,9 @@ Examples:
     
     # Output parameters
     parser.add_argument('-o', '--output', default='palo_alto.tf', help='Terraform output file')
-    parser.add_argument('--device-group', default='shared', help='Palo Alto device group')
+    parser.add_argument('--target', choices=['firewall', 'panorama'], default='firewall',
+                       help='Target device type (default: firewall)')
+    parser.add_argument('--device-group', default='shared', help='Panorama device group (only used with --target panorama)')
     parser.add_argument('--vsys', default='vsys1', help='Palo Alto vsys')
     parser.add_argument('--template', help='Palo Alto template for network config')
     
@@ -121,7 +123,8 @@ Examples:
             base_parser,
             device_group=args.device_group,
             vsys=args.vsys,
-            template=args.template
+            template=args.template,
+            target=args.target
         )
         terraform_config = tf_gen.generate_all()
         with open(args.output, 'w', encoding='utf-8') as f:

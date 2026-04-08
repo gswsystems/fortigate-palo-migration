@@ -777,11 +777,13 @@ class TerraformGenerator:
     """Generate Terraform configuration for Palo Alto Networks"""
     
     def __init__(self, parser: FortiGateParser, device_group: str = "shared",
-                 vsys: str = "vsys1", template: str = None):
+                 vsys: str = "vsys1", template: str = None,
+                 target: str = "firewall"):
         self.parser = parser
         self.device_group = device_group
         self.vsys = vsys
         self.template = template
+        self.target = target  # "firewall" or "panorama"
         self.generated_objects: Set[str] = set()
         self.generated_services: Set[str] = set()  # Track services that got a panos_service resource
         self.zone_mapping: Dict[str, str] = {}
@@ -846,8 +848,14 @@ class TerraformGenerator:
 """
     
     def _generate_location(self) -> str:
-        """Generate the location block based on device_group setting"""
-        if self.device_group == "shared":
+        """Generate the location block based on target type and device_group setting"""
+        if self.target == "firewall":
+            return f"""  location = {{
+    vsys = {{
+      name = "{self.vsys}"
+    }}
+  }}"""
+        elif self.device_group == "shared":
             return "  location = { shared = {} }"
         else:
             return f"""  location = {{
@@ -1645,10 +1653,15 @@ Environment Variables:
                        default=os.environ.get('FORTIGATE_VDOM', 'root'),
                        help='VDOM to query (default: root, env: FORTIGATE_VDOM)')
     
+    parser.add_argument('--target',
+                       choices=['firewall', 'panorama'],
+                       default='firewall',
+                       help='Target device type (default: firewall). Use "panorama" for Panorama-managed device groups')
+
     parser.add_argument('--device-group',
                        default='shared',
-                       help='Palo Alto device group (default: shared)')
-    
+                       help='Panorama device group (default: shared, only used with --target panorama)')
+
     parser.add_argument('--vsys',
                        default='vsys1',
                        help='Palo Alto vsys (default: vsys1)')
@@ -1715,16 +1728,19 @@ Environment Variables:
         
         # Generate Terraform
         print(f"\nGenerating Terraform configuration...")
-        print(f"Device Group: {args.device_group}")
+        print(f"Target: {args.target}")
+        if args.target == "panorama":
+            print(f"Device Group: {args.device_group}")
         print(f"Vsys: {args.vsys}")
         if args.template:
             print(f"Template: {args.template}")
-        
+
         tf_gen = TerraformGenerator(
             fg_parser,
             device_group=args.device_group,
             vsys=args.vsys,
-            template=args.template
+            template=args.template,
+            target=args.target
         )
         
         terraform_config = tf_gen.generate_all()
