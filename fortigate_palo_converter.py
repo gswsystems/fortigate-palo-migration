@@ -1178,32 +1178,32 @@ provider "panos" {
 
         return ''.join(output)
 
-    def _map_interface_name(self, fg_name: str) -> str:
-        """Map FortiGate interface name to Palo Alto ethernet interface name.
+    def _build_interface_mapping(self):
+        """Build a mapping of FortiGate interface names to Palo Alto ethernet1/N names.
 
-        Common FortiGate naming conventions:
-          port1, port2      -> ethernet1/1, ethernet1/2
-          wan1, wan2        -> ethernet1/1, ethernet1/2 (when no port interfaces)
-          internal, lan     -> left as-is (needs manual mapping)
-          dmz               -> left as-is
-          VLAN subinterfaces are mapped from parent interface
+        Assigns sequential ethernet1/1, ethernet1/2, etc. to all physical interfaces.
         """
-        # Match portN pattern
-        match = re.match(r'^port(\d+)$', fg_name, re.IGNORECASE)
-        if match:
-            return f"ethernet1/{match.group(1)}"
+        if hasattr(self, '_intf_name_map'):
+            return
+        self._intf_name_map = {}
+        counter = 1
+        for name, intf in self.parser.interfaces.items():
+            if intf.type in ('loopback', 'tunnel', 'ssl', 'wl-mesh') or name in ('ssl.root', 'self', 'fortilink'):
+                continue
+            if name.startswith('ha') or name in ('mgmt', 'management'):
+                continue
+            if intf.type == 'vlan' and intf.vlanid and intf.interface:
+                continue  # VLANs get mapped via their parent
+            if intf.type in ('physical', 'hard-switch', 'aggregate'):
+                self._intf_name_map[name] = f"ethernet1/{counter}"
+                counter += 1
 
-        # Match wanN pattern
-        match = re.match(r'^wan(\d+)$', fg_name, re.IGNORECASE)
-        if match:
-            return f"ethernet1/{match.group(1)}"
-
-        # Match lanN / internalN pattern
-        match = re.match(r'^(?:lan|internal)(\d+)?$', fg_name, re.IGNORECASE)
-        if match:
-            num = match.group(1) or '1'
-            return f"ethernet1/{num}"
-
+    def _map_interface_name(self, fg_name: str) -> str:
+        """Map FortiGate interface name to Palo Alto ethernet interface name."""
+        self._build_interface_mapping()
+        if fg_name in self._intf_name_map:
+            return self._intf_name_map[fg_name]
+        # Fallback for VLAN parent references not in physical list
         return fg_name
 
     def _parse_ip_mask(self, ip_field) -> Optional[str]:
@@ -1251,8 +1251,10 @@ provider "panos" {
         vlan_intfs = {}
 
         for name, intf in self.parser.interfaces.items():
-            # Skip loopback, tunnel, and system interfaces
+            # Skip loopback, tunnel, system, HA, and management interfaces
             if intf.type in ('loopback', 'tunnel', 'ssl', 'wl-mesh') or name in ('ssl.root', 'self', 'fortilink'):
+                continue
+            if name.startswith('ha') or name in ('mgmt', 'management'):
                 continue
 
             if intf.type == 'vlan' and intf.vlanid and intf.interface:
@@ -1266,16 +1268,17 @@ provider "panos" {
             panos_name = self._map_interface_name(name)
             ip_str = self._parse_ip_mask(intf.ip)
 
-            comment_line = ""
+            comment = f"FortiGate: {name}"
             if intf.alias:
-                comment_line = f"\n  comment = \"{intf.alias}\""
+                comment += f" ({intf.alias})"
+            comment_line = f'\n  comment = "{comment}"'
 
             ip_block = ""
             if ip_str:
                 ip_block = f"""
 
   layer3 = {{
-    ips = ["{ip_str}"]
+    ips = [{{ name = "{ip_str}" }}]
   }}"""
             else:
                 ip_block = """
@@ -1285,7 +1288,7 @@ provider "panos" {
             resource = f"""resource "panos_ethernet_interface" "{tf_name}" {{
 {intf_location}
 
-  name = "{panos_name}"  # FortiGate: {name}{comment_line}{ip_block}
+  name = "{panos_name}"{comment_line}{ip_block}
 }}
 
 """
@@ -1298,16 +1301,17 @@ provider "panos" {
             panos_name = f"{parent_panos}.{intf.vlanid}"
             ip_str = self._parse_ip_mask(intf.ip)
 
-            comment_line = ""
+            comment = f"FortiGate: {name} (VLAN {intf.vlanid})"
             if intf.alias:
-                comment_line = f"\n  comment = \"{intf.alias}\""
+                comment += f" ({intf.alias})"
+            comment_line = f'\n  comment = "{comment}"'
 
             ip_block = ""
             if ip_str:
                 ip_block = f"""
 
   layer3 = {{
-    ips = ["{ip_str}"]
+    ips = [{{ name = "{ip_str}" }}]
     tag = {intf.vlanid}
   }}"""
             else:
@@ -1323,7 +1327,7 @@ provider "panos" {
 {intf_location}
 
   parent = panos_ethernet_interface.{parent_tf}.name
-  name   = "{panos_name}"  # FortiGate: {name} (VLAN {intf.vlanid}){comment_line}{ip_block}
+  name   = "{panos_name}"{comment_line}{ip_block}
 
   depends_on = [panos_ethernet_interface.{parent_tf}]
 }}
