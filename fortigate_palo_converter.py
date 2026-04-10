@@ -347,16 +347,23 @@ class FortiGateParser:
                 )
             
             elif addr_type == 'fqdn':
-                addr.fqdn = addr_data.get('fqdn')
-            
+                fqdn_value = addr_data.get('fqdn', '')
+                if fqdn_value.startswith('*.'):
+                    # Wildcard FQDNs can't be FQDN address objects in Palo Alto
+                    # They need to be custom URL categories instead
+                    addr.type = 'wildcard-fqdn'
+                    addr.fqdn = fqdn_value
+                else:
+                    addr.fqdn = fqdn_value
+
             elif addr_type == 'geography':
                 addr.country = addr_data.get('country')
-            
+
             elif addr_type == 'wildcard':
                 wildcard = addr_data.get('wildcard', '').split()
                 if len(wildcard) == 2:
                     addr.wildcard = f"{wildcard[0]}/{wildcard[1]}"
-            
+
             self.addresses[name] = addr
         
         print(f"    Found {len(self.addresses)} addresses")
@@ -404,7 +411,12 @@ class FortiGateParser:
                 )
 
             elif addr_type == 'fqdn':
-                addr.fqdn = addr_data.get('fqdn')
+                fqdn_value = addr_data.get('fqdn', '')
+                if fqdn_value.startswith('*.'):
+                    addr.type = 'wildcard-fqdn'
+                    addr.fqdn = fqdn_value
+                else:
+                    addr.fqdn = fqdn_value
 
             if addr.subnet or addr.ip_range or addr.fqdn:
                 self.addresses[name] = addr
@@ -585,7 +597,7 @@ class FortiGateParser:
             
             policy = FirewallPolicy(
                 policyid=policyid,
-                name=pol_data.get('name', f"policy_{policyid}"),
+                name=pol_data.get('name') or f"policy_{policyid}",
                 srcintf=[],
                 dstintf=[],
                 srcaddr=[],
@@ -649,7 +661,7 @@ class FortiGateParser:
 
             policy = FirewallPolicy(
                 policyid=f"v6_{policyid}",
-                name=pol_data.get('name', f"policy6_{policyid}"),
+                name=pol_data.get('name') or f"policy6_{policyid}",
                 srcintf=[],
                 dstintf=[],
                 srcaddr=[],
@@ -810,6 +822,9 @@ class TerraformGenerator:
         # Address objects
         output.append(self._generate_addresses())
         
+        # Custom URL categories (wildcard FQDNs)
+        output.append(self._generate_custom_url_categories())
+
         # Address groups
         output.append(self._generate_address_groups())
         
@@ -928,6 +943,10 @@ provider "panos" {
 """
                 output.append(resource)
 
+            elif addr.type == 'wildcard-fqdn' and addr.fqdn:
+                # Wildcard FQDNs are handled as custom URL categories
+                pass
+
             elif addr.type == 'wildcard' and addr.wildcard:
                 resource = f"""resource "panos_address" "{tf_name}" {{
 {location}
@@ -940,7 +959,38 @@ provider "panos" {
                 output.append(resource)
 
         return ''.join(output)
-    
+
+    def _generate_custom_url_categories(self) -> str:
+        """Generate custom URL categories for wildcard FQDN entries"""
+        wildcard_fqdns = {name: addr for name, addr in self.parser.addresses.items()
+                         if addr.type == 'wildcard-fqdn' and addr.fqdn}
+        if not wildcard_fqdns:
+            return ''
+
+        output = ["# ===== Custom URL Categories (Wildcard FQDNs) =====\n"]
+        output.append("# FortiGate wildcard FQDN objects (*.example.com) cannot be FQDN address objects\n")
+        output.append("# in Palo Alto. They are converted to custom URL categories instead.\n")
+        output.append("# Reference these in security policy 'category' fields.\n\n")
+        location = self._generate_location()
+
+        for name, addr in wildcard_fqdns.items():
+            tf_name = self.sanitize_name(name)
+            desc_line = ""
+            if addr.comment:
+                desc_line = f"\n  description = {self._format_comment(addr.comment)}"
+
+            resource = f"""resource "panos_custom_url_category" "{tf_name}" {{
+{location}
+
+  name = "{name}"
+  list = ["{addr.fqdn}"]{desc_line}
+}}
+
+"""
+            output.append(resource)
+
+        return ''.join(output)
+
     def _generate_address_groups(self) -> str:
         """Generate address groups"""
         output = ["# ===== Address Groups =====\n"]
@@ -952,18 +1002,35 @@ provider "panos" {
 
             tf_name = self.sanitize_name(name)
 
+            # Filter out wildcard FQDN members (they are custom URL categories, not addresses)
+            regular_members = []
+            wildcard_members = []
+            for m in group.members:
+                addr_obj = self.parser.addresses.get(m)
+                if addr_obj and addr_obj.type == 'wildcard-fqdn':
+                    wildcard_members.append(m)
+                else:
+                    regular_members.append(m)
+
+            if not regular_members:
+                continue  # Skip empty groups (all members were wildcard FQDNs)
+
             # Format static members
             members_list = [f'    panos_address.{self.sanitize_name(m)}.name'
-                           for m in group.members]
+                           for m in regular_members]
             members_str = ',\n'.join(members_list)
-            depends_str = ',\n'.join(f'    panos_address.{self.sanitize_name(m)}' for m in group.members)
+            depends_str = ',\n'.join(f'    panos_address.{self.sanitize_name(m)}' for m in regular_members)
+
+            wildcard_comment = ""
+            if wildcard_members:
+                wildcard_comment = f"\n  # NOTE: Wildcard FQDN members moved to custom URL categories: {', '.join(wildcard_members)}"
 
             desc_line = ""
             if group.comment:
                 desc_line = f"\n  description = {self._format_comment(group.comment)}"
 
             resource = f"""resource "panos_address_group" "{tf_name}" {{
-{location}
+{location}{wildcard_comment}
 
   name   = "{name}"{desc_line}
   static = [
@@ -1014,6 +1081,10 @@ provider "panos" {
                     if not dest_ports:
                         continue
 
+                    # Palo Alto rejects service names containing "/" as it
+                    # interprets them as protocol/port notation (e.g. "udp/2354")
+                    panos_svc_name = svc_name.replace('/', '-')
+
                     desc_line = ""
                     if svc.comment:
                         desc_line = f"\n  description = {self._format_comment(svc.comment)}"
@@ -1021,7 +1092,7 @@ provider "panos" {
                     resource = f"""resource "panos_service" "{svc_tf_name}" {{
 {location}
 
-  name = "{svc_name}"{desc_line}
+  name = "{panos_svc_name}"{desc_line}
 
   protocol = {{
     {proto} = {{
@@ -1224,11 +1295,19 @@ resource "panos_address" "{tf_name}_nat_pool" {{
         # Determine action
         action = 'allow' if policy.action == 'accept' else 'deny'
 
+        # Separate wildcard FQDN addresses from regular addresses
+        # Wildcard FQDNs are custom URL categories, not address objects
+        url_category_refs = []
+
         # Build source addresses list
         source_addr_refs = []
         for addr in source_addresses:
             if addr != 'any':
-                source_addr_refs.append(f'    panos_address.{self.sanitize_name(addr)}.name')
+                addr_obj = self.parser.addresses.get(addr)
+                if addr_obj and addr_obj.type == 'wildcard-fqdn':
+                    url_category_refs.append(f'    panos_custom_url_category.{self.sanitize_name(addr)}.name')
+                else:
+                    source_addr_refs.append(f'    panos_address.{self.sanitize_name(addr)}.name')
 
         source_addresses_str = '["any"]' if not source_addr_refs else '[\n' + ',\n'.join(source_addr_refs) + '\n  ]'
 
@@ -1236,9 +1315,19 @@ resource "panos_address" "{tf_name}_nat_pool" {{
         dest_addr_refs = []
         for addr in dest_addresses:
             if addr != 'any':
-                dest_addr_refs.append(f'    panos_address.{self.sanitize_name(addr)}.name')
+                addr_obj = self.parser.addresses.get(addr)
+                if addr_obj and addr_obj.type == 'wildcard-fqdn':
+                    url_category_refs.append(f'    panos_custom_url_category.{self.sanitize_name(addr)}.name')
+                else:
+                    dest_addr_refs.append(f'    panos_address.{self.sanitize_name(addr)}.name')
 
         dest_addresses_str = '["any"]' if not dest_addr_refs else '[\n' + ',\n'.join(dest_addr_refs) + '\n  ]'
+
+        # Build category list (includes wildcard FQDN custom URL categories)
+        if url_category_refs:
+            category_str = '[\n' + ',\n'.join(url_category_refs) + '\n  ]'
+        else:
+            category_str = '["any"]'
 
         # Build services list
         service_refs = []
@@ -1329,7 +1418,7 @@ resource "panos_address" "{tf_name}_nat_pool" {{
     destination_addresses = {dest_addresses_str}
     applications          = ["any"]
     services              = {services_str}{skipped_svc_comment}
-    category              = ["any"]
+    category              = {category_str}
     action                = "{action}"{log_setting}{profile_setting_str}
     description           = {self._format_comment(policy.comments)}
   }}]{depends_on_str}
