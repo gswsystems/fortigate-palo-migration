@@ -834,6 +834,10 @@ class TerraformGenerator:
         # Service groups
         output.append(self._generate_service_groups())
         
+        # Interfaces (template or direct firewall)
+        if self.template or self.target == "firewall":
+            output.append(self._generate_interfaces())
+
         # Zones (if using template)
         if self.template:
             output.append(self._generate_zones())
@@ -1173,7 +1177,162 @@ provider "panos" {
             output.append(resource)
 
         return ''.join(output)
-    
+
+    def _map_interface_name(self, fg_name: str) -> str:
+        """Map FortiGate interface name to Palo Alto ethernet interface name.
+
+        Common FortiGate naming conventions:
+          port1, port2      -> ethernet1/1, ethernet1/2
+          wan1, wan2        -> ethernet1/1, ethernet1/2 (when no port interfaces)
+          internal, lan     -> left as-is (needs manual mapping)
+          dmz               -> left as-is
+          VLAN subinterfaces are mapped from parent interface
+        """
+        # Match portN pattern
+        match = re.match(r'^port(\d+)$', fg_name, re.IGNORECASE)
+        if match:
+            return f"ethernet1/{match.group(1)}"
+
+        # Match wanN pattern
+        match = re.match(r'^wan(\d+)$', fg_name, re.IGNORECASE)
+        if match:
+            return f"ethernet1/{match.group(1)}"
+
+        # Match lanN / internalN pattern
+        match = re.match(r'^(?:lan|internal)(\d+)?$', fg_name, re.IGNORECASE)
+        if match:
+            num = match.group(1) or '1'
+            return f"ethernet1/{num}"
+
+        return fg_name
+
+    def _parse_ip_mask(self, ip_field) -> Optional[str]:
+        """Parse FortiGate IP field (e.g. '192.168.1.1 255.255.255.0') to CIDR notation."""
+        if not ip_field:
+            return None
+        if isinstance(ip_field, str):
+            parts = ip_field.split()
+            if len(parts) == 2:
+                try:
+                    prefix = ipaddress.IPv4Network(f"{parts[0]}/{parts[1]}", strict=False).prefixlen
+                    return f"{parts[0]}/{prefix}"
+                except Exception:
+                    return None
+        return None
+
+    def _generate_interface_location(self) -> str:
+        """Generate location block for interface resources"""
+        if self.template:
+            return f"""  location = {{
+    template = {{
+      name = "{self.template}"
+    }}
+  }}"""
+        else:
+            return """  location = {
+    ngfw = {
+      device = "localhost.localdomain"
+    }
+  }"""
+
+    def _generate_interfaces(self) -> str:
+        """Generate Palo Alto interface configuration from FortiGate interfaces"""
+        if not self.parser.interfaces:
+            return ''
+
+        output = ["# ===== Interfaces =====\n"]
+        output.append("# IMPORTANT: Review and adjust ethernet interface names to match your Palo Alto hardware.\n")
+        output.append("# FortiGate interface names are mapped to ethernet1/N where possible.\n\n")
+
+        intf_location = self._generate_interface_location()
+
+        # Separate physical/aggregate interfaces from VLAN subinterfaces
+        physical_intfs = {}
+        vlan_intfs = {}
+
+        for name, intf in self.parser.interfaces.items():
+            # Skip loopback, tunnel, and system interfaces
+            if intf.type in ('loopback', 'tunnel', 'ssl', 'wl-mesh') or name in ('ssl.root', 'self', 'fortilink'):
+                continue
+
+            if intf.type == 'vlan' and intf.vlanid and intf.interface:
+                vlan_intfs[name] = intf
+            elif intf.type in ('physical', 'hard-switch', 'aggregate'):
+                physical_intfs[name] = intf
+
+        # Generate physical/aggregate ethernet interfaces
+        for name, intf in physical_intfs.items():
+            tf_name = self.sanitize_name(f"intf_{name}")
+            panos_name = self._map_interface_name(name)
+            ip_str = self._parse_ip_mask(intf.ip)
+
+            comment_line = ""
+            if intf.alias:
+                comment_line = f"\n  comment = \"{intf.alias}\""
+
+            ip_block = ""
+            if ip_str:
+                ip_block = f"""
+
+  layer3 = {{
+    ips = ["{ip_str}"]
+  }}"""
+            else:
+                ip_block = """
+
+  layer3 = {}"""
+
+            resource = f"""resource "panos_ethernet_interface" "{tf_name}" {{
+{intf_location}
+
+  name = "{panos_name}"  # FortiGate: {name}{comment_line}{ip_block}
+}}
+
+"""
+            output.append(resource)
+
+        # Generate VLAN subinterfaces
+        for name, intf in vlan_intfs.items():
+            tf_name = self.sanitize_name(f"intf_{name}")
+            parent_panos = self._map_interface_name(intf.interface)
+            panos_name = f"{parent_panos}.{intf.vlanid}"
+            ip_str = self._parse_ip_mask(intf.ip)
+
+            comment_line = ""
+            if intf.alias:
+                comment_line = f"\n  comment = \"{intf.alias}\""
+
+            ip_block = ""
+            if ip_str:
+                ip_block = f"""
+
+  layer3 = {{
+    ips = ["{ip_str}"]
+    tag = {intf.vlanid}
+  }}"""
+            else:
+                ip_block = f"""
+
+  layer3 = {{
+    tag = {intf.vlanid}
+  }}"""
+
+            parent_tf = self.sanitize_name(f"intf_{intf.interface}")
+
+            resource = f"""resource "panos_layer3_subinterface" "{tf_name}" {{
+{intf_location}
+
+  parent = panos_ethernet_interface.{parent_tf}.name
+  name   = "{panos_name}"  # FortiGate: {name} (VLAN {intf.vlanid}){comment_line}{ip_block}
+
+  depends_on = [panos_ethernet_interface.{parent_tf}]
+}}
+
+"""
+            output.append(resource)
+
+        return ''.join(output)
+
     def _generate_zones(self) -> str:
         """Generate zone configuration"""
         output = ["# ===== Zones =====\n"]
@@ -1197,6 +1356,37 @@ provider "panos" {
         for zone_name in sorted(zones_to_create):
             tf_name = self.sanitize_name(zone_name)
 
+            # Try to populate zone interfaces from FortiGate zone members or the zone name itself
+            zone_intf_refs = []
+            if zone_name in self.parser.zones:
+                for member in self.parser.zones[zone_name]:
+                    if member in self.parser.interfaces:
+                        intf_tf = self.sanitize_name(f"intf_{member}")
+                        intf = self.parser.interfaces[member]
+                        if intf.type == 'vlan' and intf.vlanid and intf.interface:
+                            zone_intf_refs.append(f'    panos_layer3_subinterface.{intf_tf}.name')
+                        else:
+                            zone_intf_refs.append(f'    panos_ethernet_interface.{intf_tf}.name')
+            elif zone_name in self.parser.interfaces:
+                intf_tf = self.sanitize_name(f"intf_{zone_name}")
+                intf = self.parser.interfaces[zone_name]
+                if intf.type == 'vlan' and intf.vlanid and intf.interface:
+                    zone_intf_refs.append(f'    panos_layer3_subinterface.{intf_tf}.name')
+                else:
+                    zone_intf_refs.append(f'    panos_ethernet_interface.{intf_tf}.name')
+
+            if zone_intf_refs:
+                intf_list = ',\n'.join(zone_intf_refs)
+                layer3_block = f"""  network = {{
+    layer3 = [
+{intf_list}
+    ]
+  }}"""
+            else:
+                layer3_block = """  network = {
+    layer3 = []
+  }"""
+
             resource = f"""resource "panos_zone" "{tf_name}" {{
   location = {{
     template = {{
@@ -1206,9 +1396,7 @@ provider "panos" {
 
   name = "{zone_name}"
 
-  network = {{
-    layer3 = []
-  }}
+{layer3_block}
 }}
 
 """
