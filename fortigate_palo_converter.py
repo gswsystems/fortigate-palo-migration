@@ -2042,7 +2042,55 @@ Environment Variables:
         print(f"  - Static Routes: {len(fg_parser.static_routes)}")
         print(f"  - Interfaces: {len(fg_parser.interfaces)}")
         print(f"  - Zones: {len(fg_parser.zones)}")
-        
+
+        # Print interface mapping table
+        print(f"\n{'='*60}")
+        print(f"Interface Mapping (FortiGate → Palo Alto)")
+        print(f"{'='*60}")
+        tf_gen._build_interface_mapping()
+
+        # Physical interfaces
+        skipped = []
+        print(f"\n  {'FortiGate':<20} {'Palo Alto':<20} {'IP':<20} {'Alias'}")
+        print(f"  {'-'*20} {'-'*20} {'-'*20} {'-'*20}")
+        for name, intf in fg_parser.interfaces.items():
+            if intf.type in ('loopback', 'tunnel', 'ssl', 'wl-mesh') or name in ('ssl.root', 'self', 'fortilink'):
+                skipped.append((name, "system/virtual"))
+                continue
+            if name.startswith('ha') or name in ('mgmt', 'management'):
+                skipped.append((name, "HA/management"))
+                continue
+            if intf.type == 'vlan' and intf.vlanid and intf.interface:
+                continue  # Print VLANs separately
+            if intf.type in ('physical', 'hard-switch', 'aggregate'):
+                panos_name = tf_gen._intf_name_map.get(name, "unmapped")
+                ip_str = tf_gen._parse_ip_mask(intf.ip) or "-"
+                alias = intf.alias or "-"
+                print(f"  {name:<20} {panos_name:<20} {ip_str:<20} {alias}")
+
+        # VLAN subinterfaces
+        vlan_printed = False
+        for name, intf in fg_parser.interfaces.items():
+            if intf.type == 'vlan' and intf.vlanid and intf.interface:
+                if not vlan_printed:
+                    print(f"\n  VLAN Subinterfaces:")
+                    print(f"  {'FortiGate':<20} {'Palo Alto':<20} {'IP':<20} {'Alias'}")
+                    print(f"  {'-'*20} {'-'*20} {'-'*20} {'-'*20}")
+                    vlan_printed = True
+                parent_panos = tf_gen._intf_name_map.get(intf.interface, intf.interface)
+                panos_name = f"{parent_panos}.{intf.vlanid}"
+                ip_str = tf_gen._parse_ip_mask(intf.ip) or "-"
+                alias = intf.alias or "-"
+                print(f"  {name:<20} {panos_name:<20} {ip_str:<20} {alias}")
+
+        # Skipped interfaces
+        if skipped:
+            print(f"\n  Skipped interfaces (not migrated):")
+            for name, reason in skipped:
+                print(f"    {name:<20} ({reason})")
+
+        print(f"\n{'='*60}")
+
         print(f"\nNext steps:")
         print(f"  1. Review the generated Terraform file: {args.output}")
         print(f"  2. Initialize Terraform: terraform init")

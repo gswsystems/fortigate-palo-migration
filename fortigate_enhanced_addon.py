@@ -623,6 +623,7 @@ class MigrationReportGenerator:
         
         sections.append(self._generate_header())
         sections.append(self._generate_summary())
+        sections.append(self._generate_interface_mapping())
         sections.append(self._generate_automated_section())
         sections.append(self._generate_manual_tasks())
         sections.append(self._generate_vpn_worksheet())
@@ -684,6 +685,74 @@ class MigrationReportGenerator:
 
 ---"""
     
+    def _generate_interface_mapping(self) -> str:
+        """Generate interface mapping table"""
+        lines = ["## Interface Mapping\n"]
+        lines.append("### Physical Interfaces\n")
+        lines.append("| FortiGate | Palo Alto | IP | Alias |")
+        lines.append("|-----------|-----------|-------|-------|")
+
+        counter = 1
+        intf_map = {}
+        skipped = []
+        for name, intf in self.base.interfaces.items():
+            if intf.type in ('loopback', 'tunnel', 'ssl', 'wl-mesh') or name in ('ssl.root', 'self', 'fortilink'):
+                skipped.append((name, "system/virtual"))
+                continue
+            if name.startswith('ha') or name in ('mgmt', 'management'):
+                skipped.append((name, "HA/management"))
+                continue
+            if intf.type == 'vlan' and intf.vlanid and intf.interface:
+                continue
+            if intf.type in ('physical', 'hard-switch', 'aggregate'):
+                panos_name = f"ethernet1/{counter}"
+                intf_map[name] = panos_name
+                counter += 1
+                ip_str = self._format_ip(intf.ip) or "-"
+                alias = intf.alias or "-"
+                lines.append(f"| {name} | {panos_name} | {ip_str} | {alias} |")
+
+        # VLAN subinterfaces
+        vlan_lines = []
+        for name, intf in self.base.interfaces.items():
+            if intf.type == 'vlan' and intf.vlanid and intf.interface:
+                parent_panos = intf_map.get(intf.interface, intf.interface)
+                panos_name = f"{parent_panos}.{intf.vlanid}"
+                ip_str = self._format_ip(intf.ip) or "-"
+                alias = intf.alias or "-"
+                vlan_lines.append(f"| {name} | {panos_name} | {ip_str} | {alias} |")
+
+        if vlan_lines:
+            lines.append("\n### VLAN Subinterfaces\n")
+            lines.append("| FortiGate | Palo Alto | IP | Alias |")
+            lines.append("|-----------|-----------|-------|-------|")
+            lines.extend(vlan_lines)
+
+        if skipped:
+            lines.append("\n### Skipped Interfaces (not migrated)\n")
+            lines.append("| Interface | Reason |")
+            lines.append("|-----------|--------|")
+            for name, reason in skipped:
+                lines.append(f"| {name} | {reason} |")
+
+        lines.append("\n---")
+        return "\n".join(lines)
+
+    def _format_ip(self, ip_field) -> str:
+        """Format FortiGate IP field to CIDR notation"""
+        if not ip_field:
+            return ""
+        if isinstance(ip_field, str):
+            parts = ip_field.split()
+            if len(parts) == 2:
+                import ipaddress
+                try:
+                    network = ipaddress.IPv4Network(f"{parts[0]}/{parts[1]}", strict=False)
+                    return f"{parts[0]}/{network.prefixlen}"
+                except (ValueError, IndexError):
+                    return ip_field
+        return str(ip_field) if ip_field else ""
+
     def _generate_automated_section(self) -> str:
         """Generate automated migration section"""
         return """## Automated Migration Components
