@@ -1306,24 +1306,17 @@ provider "panos" {
                 comment += f" ({intf.alias})"
             comment_line = f'\n  comment = "{comment}"'
 
-            ip_block = ""
             if ip_str:
                 ip_block = f"""
-
-  layer3 = {{
-    ips = [{{ name = "{ip_str}" }}]
-    tag = {intf.vlanid}
-  }}"""
+  ip  = [{{ name = "{ip_str}" }}]
+  tag = {intf.vlanid}"""
             else:
                 ip_block = f"""
-
-  layer3 = {{
-    tag = {intf.vlanid}
-  }}"""
+  tag = {intf.vlanid}"""
 
             parent_tf = self.sanitize_name(f"intf_{intf.interface}")
 
-            resource = f"""resource "panos_layer3_subinterface" "{tf_name}" {{
+            resource = f"""resource "panos_ethernet_layer3_subinterface" "{tf_name}" {{
 {intf_location}
 
   parent = panos_ethernet_interface.{parent_tf}.name
@@ -1368,14 +1361,14 @@ provider "panos" {
                         intf_tf = self.sanitize_name(f"intf_{member}")
                         intf = self.parser.interfaces[member]
                         if intf.type == 'vlan' and intf.vlanid and intf.interface:
-                            zone_intf_refs.append(f'    panos_layer3_subinterface.{intf_tf}.name')
+                            zone_intf_refs.append(f'    panos_ethernet_layer3_subinterface.{intf_tf}.name')
                         else:
                             zone_intf_refs.append(f'    panos_ethernet_interface.{intf_tf}.name')
             elif zone_name in self.parser.interfaces:
                 intf_tf = self.sanitize_name(f"intf_{zone_name}")
                 intf = self.parser.interfaces[zone_name]
                 if intf.type == 'vlan' and intf.vlanid and intf.interface:
-                    zone_intf_refs.append(f'    panos_layer3_subinterface.{intf_tf}.name')
+                    zone_intf_refs.append(f'    panos_ethernet_layer3_subinterface.{intf_tf}.name')
                 else:
                     zone_intf_refs.append(f'    panos_ethernet_interface.{intf_tf}.name')
 
