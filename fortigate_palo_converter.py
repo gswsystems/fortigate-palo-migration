@@ -1320,8 +1320,8 @@ provider "panos" {
 
             if ip_str:
                 ip_block = f"""
-  ip  = [{{ name = "{ip_str}" }}]
-  tag = {intf.vlanid}"""
+  tag = {intf.vlanid}
+  ips = [{{ name = "{ip_str}" }}]"""
             else:
                 ip_block = f"""
   tag = {intf.vlanid}"""
@@ -1362,6 +1362,15 @@ provider "panos" {
                     zones_to_create.add(intf)
                     self.zone_mapping[intf] = intf
 
+        def _intf_is_generated(intf, intf_name):
+            if intf.type in ('loopback', 'tunnel', 'ssl', 'wl-mesh'):
+                return False
+            if intf_name in ('ssl.root', 'self', 'fortilink'):
+                return False
+            if intf_name.startswith('ha') or intf_name in ('mgmt', 'management'):
+                return False
+            return True
+
         for zone_name in sorted(zones_to_create):
             tf_name = self.sanitize_name(zone_name)
 
@@ -1370,19 +1379,22 @@ provider "panos" {
             if zone_name in self.parser.zones:
                 for member in self.parser.zones[zone_name]:
                     if member in self.parser.interfaces:
-                        intf_tf = self.sanitize_name(f"intf_{member}")
                         intf = self.parser.interfaces[member]
+                        if not _intf_is_generated(intf, member):
+                            continue
+                        intf_tf = self.sanitize_name(f"intf_{member}")
                         if intf.type == 'vlan' and intf.vlanid and intf.interface:
                             zone_intf_refs.append(f'    panos_ethernet_layer3_subinterface.{intf_tf}.name')
                         else:
                             zone_intf_refs.append(f'    panos_ethernet_interface.{intf_tf}.name')
             elif zone_name in self.parser.interfaces:
-                intf_tf = self.sanitize_name(f"intf_{zone_name}")
                 intf = self.parser.interfaces[zone_name]
-                if intf.type == 'vlan' and intf.vlanid and intf.interface:
-                    zone_intf_refs.append(f'    panos_ethernet_layer3_subinterface.{intf_tf}.name')
-                else:
-                    zone_intf_refs.append(f'    panos_ethernet_interface.{intf_tf}.name')
+                if _intf_is_generated(intf, zone_name):
+                    intf_tf = self.sanitize_name(f"intf_{zone_name}")
+                    if intf.type == 'vlan' and intf.vlanid and intf.interface:
+                        zone_intf_refs.append(f'    panos_ethernet_layer3_subinterface.{intf_tf}.name')
+                    else:
+                        zone_intf_refs.append(f'    panos_ethernet_interface.{intf_tf}.name')
 
             if zone_intf_refs:
                 intf_list = ',\n'.join(zone_intf_refs)
