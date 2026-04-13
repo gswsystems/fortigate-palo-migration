@@ -799,6 +799,7 @@ class TerraformGenerator:
         self.generated_objects: Set[str] = set()
         self.generated_services: Set[str] = set()  # Track services that got a panos_service resource
         self.zone_mapping: Dict[str, str] = {}
+        self._vip_services: Dict[str, tuple] = {}  # tf_name -> (panos_name, proto, port)
         
     def sanitize_name(self, name: str) -> str:
         """Sanitize object names for Terraform"""
@@ -810,13 +811,17 @@ class TerraformGenerator:
         return sanitized or 'unnamed'
 
     def panos_object_name(self, name: str) -> str:
-        """Sanitize object names for PAN-OS (allowed: letters, digits, dot, hyphen, underscore, space; max 63)."""
+        """Sanitize object names for PAN-OS (allowed: letters, digits, dot, hyphen, underscore, space; max 63). Must start with alphanumeric."""
         if not name:
             return 'unnamed'
         sanitized = re.sub(r'[^a-zA-Z0-9._\- ]', '_', name)
         sanitized = sanitized.strip(' .')
         if not sanitized:
             return 'unnamed'
+        if not sanitized[0].isalnum():
+            sanitized = 'o_' + sanitized.lstrip('_-. ')
+            if not sanitized or sanitized == 'o_':
+                return 'unnamed'
         return sanitized[:63]
     
     def generate_all(self) -> str:
@@ -860,6 +865,9 @@ class TerraformGenerator:
         
         # NAT policies
         output.append(self._generate_nat_policies())
+
+        # Service objects referenced by VIP NAT rules (collected during NAT generation)
+        output.append(self._generate_vip_services())
         
         # Static routes (if using template)
         if self.template:
@@ -1225,6 +1233,8 @@ provider "panos" {
         if isinstance(ip_field, str):
             parts = ip_field.split()
             if len(parts) == 2:
+                if parts[0] == '0.0.0.0':
+                    return None
                 try:
                     prefix = ipaddress.IPv4Network(f"{parts[0]}/{parts[1]}", strict=False).prefixlen
                     return f"{parts[0]}/{prefix}"
@@ -1274,11 +1284,20 @@ provider "panos" {
             elif intf.type in ('physical', 'hard-switch', 'aggregate'):
                 physical_intfs[name] = intf
 
+        # Physical interfaces that are parents of VLAN subinterfaces must still
+        # be emitted so the subinterface resource can reference them.
+        vlan_parents = {intf.interface for intf in vlan_intfs.values() if intf.interface}
+
         # Generate physical/aggregate ethernet interfaces
         for name, intf in physical_intfs.items():
             tf_name = self.sanitize_name(f"intf_{name}")
             panos_name = self._map_interface_name(name)
             ip_str = self._parse_ip_mask(intf.ip)
+
+            if not ip_str and name not in vlan_parents:
+                # Skip unconfigured ports — they already exist on the device
+                # and we have nothing meaningful to apply.
+                continue
 
             comment = f"FortiGate: {name}"
             if intf.alias:
@@ -1358,6 +1377,8 @@ provider "panos" {
         # From policies (extract unique interface names)
         for policy in self.parser.policies:
             for intf in policy.srcintf + policy.dstintf:
+                if intf in ('any', 'all', ''):
+                    continue
                 if intf not in self.zone_mapping:
                     zones_to_create.add(intf)
                     self.zone_mapping[intf] = intf
@@ -1742,6 +1763,27 @@ resource "panos_address" "{tf_name}_nat_pool" {{
 
         return resource
     
+    def _generate_vip_services(self) -> str:
+        """Emit panos_service objects referenced by VIP NAT rules."""
+        if not self._vip_services:
+            return ''
+        location = self._generate_location()
+        output = ["# ===== Services for VIP NAT rules =====\n"]
+        for svc_tf, (svc_name, proto, port) in self._vip_services.items():
+            output.append(f"""resource "panos_service" "{svc_tf}" {{
+{location}
+
+  name     = "{self.panos_object_name(svc_name)}"
+  protocol = {{
+    {proto} = {{
+      destination_port = "{port}"
+    }}
+  }}
+}}
+
+""")
+        return ''.join(output)
+
     def _generate_vip_nat(self, name: str, vip: VIP) -> str:
         """Generate NAT policy for Virtual IP (destination NAT)"""
         tf_name = self.sanitize_name(f"vip_{name}")
@@ -1752,7 +1794,14 @@ resource "panos_address" "{tf_name}_nat_pool" {{
 
         # Port forwarding or static NAT
         if vip.portforward == 'enable' and vip.protocol and vip.extport and vip.mappedport:
-            # Port forwarding (destination NAT with port translation)
+            # Port forwarding needs a service object matching the external port.
+            proto = (vip.protocol or 'tcp').lower()
+            if proto not in ('tcp', 'udp'):
+                proto = 'tcp'
+            svc_name = f"vip-svc-{proto}-{vip.extport}"
+            svc_tf = self.sanitize_name(f"vip_svc_{proto}_{vip.extport}")
+            self._vip_services[svc_tf] = (svc_name, proto, str(vip.extport))
+
             resource = f"""resource "panos_nat_policy_rules" "{tf_name}" {{
 {location}
 
@@ -1766,13 +1815,15 @@ resource "panos_address" "{tf_name}_nat_pool" {{
     destination_zone      = ["{dest_zone}"]
     source_addresses      = ["any"]
     destination_addresses = ["{vip.extip}"]
-    service               = "service-tcp-{vip.extport}"
+    service               = "{svc_name}"
     destination_translation = {{
       translated_address = "{vip.mappedip}"
       translated_port    = {vip.mappedport}
     }}
     description = {self._format_comment(vip.comment)}
   }}]
+
+  depends_on = [panos_service.{svc_tf}]
 }}
 
 """
