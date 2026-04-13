@@ -808,6 +808,16 @@ class TerraformGenerator:
         if sanitized and sanitized[0].isdigit():
             sanitized = 'obj_' + sanitized
         return sanitized or 'unnamed'
+
+    def panos_object_name(self, name: str) -> str:
+        """Sanitize object names for PAN-OS (allowed: letters, digits, dot, hyphen, underscore, space; max 63)."""
+        if not name:
+            return 'unnamed'
+        sanitized = re.sub(r'[^a-zA-Z0-9._\- ]', '_', name)
+        sanitized = sanitized.strip(' .')
+        if not sanitized:
+            return 'unnamed'
+        return sanitized[:63]
     
     def generate_all(self) -> str:
         """Generate complete Terraform configuration"""
@@ -838,8 +848,8 @@ class TerraformGenerator:
         if self.template or self.target == "firewall":
             output.append(self._generate_interfaces())
 
-        # Zones (if using template)
-        if self.template:
+        # Zones (template or direct firewall)
+        if self.template or self.target == "firewall":
             output.append(self._generate_zones())
         
         # NAT pools (Dynamic IP and Port translation)
@@ -909,6 +919,7 @@ provider "panos" {
 
         for name, addr in self.parser.addresses.items():
             tf_name = self.sanitize_name(name)
+            panos_name = self.panos_object_name(name)
             desc_line = ""
             if addr.comment:
                 desc_line = f"\n  description = {self._format_comment(addr.comment)}"
@@ -917,7 +928,7 @@ provider "panos" {
                 resource = f"""resource "panos_address" "{tf_name}" {{
 {location}
 
-  name       = "{name}"
+  name       = "{panos_name}"
   ip_netmask = "{addr.subnet}"{desc_line}
 }}
 
@@ -929,7 +940,7 @@ provider "panos" {
                 resource = f"""resource "panos_address" "{tf_name}" {{
 {location}
 
-  name     = "{name}"
+  name     = "{panos_name}"
   ip_range = "{start_ip}-{end_ip}"{desc_line}
 }}
 
@@ -940,7 +951,7 @@ provider "panos" {
                 resource = f"""resource "panos_address" "{tf_name}" {{
 {location}
 
-  name = "{name}"
+  name = "{panos_name}"
   fqdn = "{addr.fqdn}"{desc_line}
 }}
 
@@ -955,7 +966,7 @@ provider "panos" {
                 resource = f"""resource "panos_address" "{tf_name}" {{
 {location}
 
-  name        = "{name}"
+  name        = "{panos_name}"
   ip_wildcard = "{addr.wildcard}"{desc_line}
 }}
 
@@ -983,10 +994,11 @@ provider "panos" {
             if addr.comment:
                 desc_line = f"\n  description = {self._format_comment(addr.comment)}"
 
+            panos_name = self.panos_object_name(name)
             resource = f"""resource "panos_custom_url_category" "{tf_name}" {{
 {location}
 
-  name = "{name}"
+  name = "{panos_name}"
   list = ["{addr.fqdn}"]{desc_line}
 }}
 
@@ -1033,10 +1045,11 @@ provider "panos" {
             if group.comment:
                 desc_line = f"\n  description = {self._format_comment(group.comment)}"
 
+            panos_name = self.panos_object_name(name)
             resource = f"""resource "panos_address_group" "{tf_name}" {{
 {location}{wildcard_comment}
 
-  name   = "{name}"{desc_line}
+  name   = "{panos_name}"{desc_line}
   static = [
 {members_str}
   ]
@@ -1085,9 +1098,7 @@ provider "panos" {
                     if not dest_ports:
                         continue
 
-                    # Palo Alto rejects service names containing "/" as it
-                    # interprets them as protocol/port notation (e.g. "udp/2354")
-                    panos_svc_name = svc_name.replace('/', '-')
+                    panos_svc_name = self.panos_object_name(svc_name.replace('/', '-'))
 
                     desc_line = ""
                     if svc.comment:
@@ -1160,10 +1171,11 @@ provider "panos" {
             if skipped_members:
                 skipped_comment = f"\n  # NOTE: Skipped ICMP/unsupported members: {', '.join(skipped_members)}"
 
+            panos_name = self.panos_object_name(name)
             resource = f"""resource "panos_service_group" "{tf_name}" {{
 {location}
 
-  name    = "{name}"{skipped_comment}
+  name    = "{panos_name}"{skipped_comment}
   members = [
 {members_str}
   ]
@@ -1384,14 +1396,24 @@ provider "panos" {
     layer3 = []
   }"""
 
-            resource = f"""resource "panos_zone" "{tf_name}" {{
-  location = {{
+            if self.template:
+                zone_location = f"""  location = {{
     template = {{
       name = "{self.template}"
+      vsys = "{self.vsys}"
     }}
-  }}
+  }}"""
+            else:
+                zone_location = f"""  location = {{
+    vsys = {{
+      name = "{self.vsys}"
+    }}
+  }}"""
 
-  name = "{zone_name}"
+            resource = f"""resource "panos_zone" "{tf_name}" {{
+{zone_location}
+
+  name = "{self.panos_object_name(zone_name)}"
 
 {layer3_block}
 }}
@@ -1417,7 +1439,7 @@ provider "panos" {
 resource "panos_address" "{tf_name}_nat_pool" {{
 {location}
 
-  name        = "{name}_nat_pool"
+  name        = "{self.panos_object_name(name + '_nat_pool')}"
   ip_range    = "{pool.startip}-{pool.endip}"
   description = {self._format_comment(f"NAT pool from FortiGate: {pool.comments or name}")}
 }}
@@ -1454,9 +1476,13 @@ resource "panos_address" "{tf_name}_nat_pool" {{
         tf_name = self.sanitize_name(f"policy_{policy.policyid}_{policy.name}")
         location = self._generate_location()
 
-        # Map FortiGate interfaces to Palo Alto zones
-        source_zones = [self.zone_mapping.get(intf, intf) for intf in policy.srcintf]
-        dest_zones = [self.zone_mapping.get(intf, intf) for intf in policy.dstintf]
+        # Map FortiGate interfaces to Palo Alto zones (and sanitize for PAN-OS)
+        source_zones = [self.panos_object_name(self.zone_mapping.get(intf, intf)) for intf in policy.srcintf]
+        dest_zones = [self.panos_object_name(self.zone_mapping.get(intf, intf)) for intf in policy.dstintf]
+        if not source_zones:
+            source_zones = ['any']
+        if not dest_zones:
+            dest_zones = ['any']
 
         # Handle special "all" or "any" addresses
         source_addresses = ['any'] if 'all' in policy.srcaddr else policy.srcaddr
@@ -1538,9 +1564,11 @@ resource "panos_address" "{tf_name}_nat_pool" {{
 
         # Build depends_on
         depends_on = []
-        if self.template:
-            for zone in source_zones + dest_zones:
-                depends_on.append(f'    panos_zone.{self.sanitize_name(zone)}')
+        if self.template or self.target == "firewall":
+            for intf in policy.srcintf + policy.dstintf:
+                zone = self.zone_mapping.get(intf, intf)
+                if zone and zone != 'any':
+                    depends_on.append(f'    panos_zone.{self.sanitize_name(zone)}')
 
         depends_on_str = ''
         if depends_on:
@@ -1596,7 +1624,7 @@ resource "panos_address" "{tf_name}_nat_pool" {{
   }}
 
   rules = [{{
-    name                  = "{policy.name}"
+    name                  = "{self.panos_object_name(policy.name or f'policy_{policy.policyid}')}"
     source_zones          = {json.dumps(source_zones)}
     source_addresses      = {source_addresses_str}
     destination_zones     = {json.dumps(dest_zones)}
@@ -1634,13 +1662,13 @@ resource "panos_address" "{tf_name}_nat_pool" {{
         tf_name = self.sanitize_name(f"nat_{policy.policyid}_{policy.name}")
         location = self._generate_location()
 
-        # Map interfaces to zones
-        source_zones = [self.zone_mapping.get(intf, intf) for intf in policy.srcintf]
-        dest_zones = [self.zone_mapping.get(intf, intf) for intf in policy.dstintf]
+        # Map interfaces to zones (sanitize for PAN-OS)
+        source_zones = [self.panos_object_name(self.zone_mapping.get(intf, intf)) for intf in policy.srcintf] or ['any']
+        dest_zones = [self.panos_object_name(self.zone_mapping.get(intf, intf)) for intf in policy.dstintf] or ['any']
 
-        # Handle addresses
-        source_addresses = ['any'] if 'all' in policy.srcaddr else policy.srcaddr
-        dest_addresses = ['any'] if 'all' in policy.dstaddr else policy.dstaddr
+        # Handle addresses (sanitize names to match panos object names)
+        source_addresses = ['any'] if 'all' in policy.srcaddr else [self.panos_object_name(a) for a in policy.srcaddr]
+        dest_addresses = ['any'] if 'all' in policy.dstaddr else [self.panos_object_name(a) for a in policy.dstaddr]
 
         # Determine NAT type
         if policy.poolname:
@@ -1655,7 +1683,7 @@ resource "panos_address" "{tf_name}_nat_pool" {{
   }}
 
   rules = [{{
-    name                  = "{policy.name}_nat"
+    name                  = "{self.panos_object_name((policy.name or f'policy_{policy.policyid}') + '_nat')}"
     source_zones          = {json.dumps(source_zones)}
     destination_zone      = {json.dumps(dest_zones[:1] if dest_zones else ['any'])}
     source_addresses      = {json.dumps(source_addresses)}
@@ -1682,7 +1710,7 @@ resource "panos_address" "{tf_name}_nat_pool" {{
   }}
 
   rules = [{{
-    name                  = "{policy.name}_nat"
+    name                  = "{self.panos_object_name((policy.name or f'policy_{policy.policyid}') + '_nat')}"
     source_zones          = {json.dumps(source_zones)}
     destination_zone      = {json.dumps(dest_zones[:1] if dest_zones else ['any'])}
     source_addresses      = {json.dumps(source_addresses)}
@@ -1708,7 +1736,7 @@ resource "panos_address" "{tf_name}_nat_pool" {{
         location = self._generate_location()
 
         # Determine zone
-        dest_zone = self.zone_mapping.get(vip.extintf, vip.extintf) if vip.extintf != 'any' else 'any'
+        dest_zone = self.panos_object_name(self.zone_mapping.get(vip.extintf, vip.extintf)) if vip.extintf != 'any' else 'any'
 
         # Port forwarding or static NAT
         if vip.portforward == 'enable' and vip.protocol and vip.extport and vip.mappedport:
@@ -1721,7 +1749,7 @@ resource "panos_address" "{tf_name}_nat_pool" {{
   }}
 
   rules = [{{
-    name                  = "{name}_dnat"
+    name                  = "{self.panos_object_name(name + '_dnat')}"
     source_zones          = ["any"]
     destination_zone      = ["{dest_zone}"]
     source_addresses      = ["any"]
@@ -1746,7 +1774,7 @@ resource "panos_address" "{tf_name}_nat_pool" {{
   }}
 
   rules = [{{
-    name                  = "{name}_static_nat"
+    name                  = "{self.panos_object_name(name + '_static_nat')}"
     source_zones          = ["any"]
     destination_zone      = ["{dest_zone}"]
     source_addresses      = ["any"]
