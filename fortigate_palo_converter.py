@@ -1345,7 +1345,7 @@ provider "panos" {
             if ip_str:
                 ip_block = f"""
   tag = {intf.vlanid}
-  ips = [{{ name = "{ip_str}" }}]"""
+  ip  = [{{ name = "{ip_str}" }}]"""
             else:
                 ip_block = f"""
   tag = {intf.vlanid}"""
