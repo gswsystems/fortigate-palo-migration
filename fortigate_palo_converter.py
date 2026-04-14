@@ -956,6 +956,11 @@ provider "panos" {
                 output.append(resource)
 
             elif addr.type == 'fqdn' and addr.fqdn:
+                if addr.fqdn.startswith('*'):
+                    # PAN-OS fqdn objects reject wildcards; promote to
+                    # wildcard-fqdn so _generate_custom_url_categories picks it up.
+                    addr.type = 'wildcard-fqdn'
+                    continue
                 resource = f"""resource "panos_address" "{tf_name}" {{
 {location}
 
