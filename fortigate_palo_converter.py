@@ -1212,15 +1212,39 @@ provider "panos" {
             return
         self._intf_name_map = {}
         counter = 1
+
+        # Collect every interface referenced as a VLAN parent so we can
+        # guarantee it gets a mapping even if its FortiGate type is unusual
+        # (or it is only implicitly referenced by child VLANs).
+        vlan_parent_names = {
+            intf.interface for intf in self.parser.interfaces.values()
+            if intf.type == 'vlan' and intf.vlanid and intf.interface
+        }
+
+        def _is_mappable_physical(nm, it):
+            if it is None:
+                return nm in vlan_parent_names
+            if it.type in ('loopback', 'tunnel', 'ssl', 'wl-mesh') or nm in ('ssl.root', 'self', 'fortilink'):
+                return False
+            if nm.startswith('ha') or nm in ('mgmt', 'management'):
+                return False
+            if it.type == 'vlan' and it.vlanid and it.interface:
+                return False
+            if it.type in ('physical', 'hard-switch', 'aggregate'):
+                return True
+            return nm in vlan_parent_names
+
         for name, intf in self.parser.interfaces.items():
-            if intf.type in ('loopback', 'tunnel', 'ssl', 'wl-mesh') or name in ('ssl.root', 'self', 'fortilink'):
-                continue
-            if name.startswith('ha') or name in ('mgmt', 'management'):
-                continue
-            if intf.type == 'vlan' and intf.vlanid and intf.interface:
-                continue  # VLANs get mapped via their parent
-            if intf.type in ('physical', 'hard-switch', 'aggregate'):
+            if _is_mappable_physical(name, intf):
                 self._intf_name_map[name] = f"ethernet1/{counter}"
+                counter += 1
+
+        # Parents referenced by VLAN subinterfaces but absent from the
+        # FortiGate interface list still need a mapping so the generated
+        # Terraform resource names line up.
+        for parent in vlan_parent_names:
+            if parent not in self._intf_name_map:
+                self._intf_name_map[parent] = f"ethernet1/{counter}"
                 counter += 1
 
     def _map_interface_name(self, fg_name: str) -> str:
@@ -1290,14 +1314,21 @@ provider "panos" {
                 physical_intfs[name] = intf
 
         # Physical interfaces that are parents of VLAN subinterfaces must still
-        # be emitted so the subinterface resource can reference them.
+        # be emitted so the subinterface resource can reference them. This
+        # includes parents whose FortiGate type is not physical/aggregate
+        # (e.g. switch, redundant) and parents that aren't defined as their
+        # own `edit` block in the source config at all.
         vlan_parents = {intf.interface for intf in vlan_intfs.values() if intf.interface}
+        for parent in vlan_parents:
+            if parent in physical_intfs:
+                continue
+            physical_intfs[parent] = self.parser.interfaces.get(parent)
 
         # Generate physical/aggregate ethernet interfaces
         for name, intf in physical_intfs.items():
             tf_name = self.sanitize_name(f"intf_{name}")
             panos_name = self._map_interface_name(name)
-            ip_str = self._parse_ip_mask(intf.ip)
+            ip_str = self._parse_ip_mask(intf.ip) if intf else None
 
             if not ip_str and name not in vlan_parents:
                 # Skip unconfigured ports — they already exist on the device
@@ -1305,8 +1336,10 @@ provider "panos" {
                 continue
 
             comment = f"FortiGate: {name}"
-            if intf.alias:
+            if intf and intf.alias:
                 comment += f" ({intf.alias})"
+            if intf is None or (intf.type not in ('physical', 'aggregate')):
+                comment += " [REVIEW: FortiGate internal/switch parent — remap to a real PAN-OS port]"
             comment_line = f'\n  comment = "{comment}"'
 
             ip_block = ""
