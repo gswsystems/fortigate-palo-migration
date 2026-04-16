@@ -798,6 +798,7 @@ class TerraformGenerator:
         self.target = target  # "firewall" or "panorama"
         self.generated_objects: Set[str] = set()
         self.generated_services: Set[str] = set()  # Track services that got a panos_service resource
+        self.generated_interfaces: Set[str] = set()  # Track interfaces that got a TF resource
         self.zone_mapping: Dict[str, str] = {}
         self._vip_services: Dict[str, tuple] = {}  # tf_name -> (panos_name, proto, port)
         
@@ -1335,6 +1336,8 @@ provider "panos" {
                 # and we have nothing meaningful to apply.
                 continue
 
+            self.generated_interfaces.add(name)
+
             comment = f"FortiGate: {name}"
             if intf and intf.alias:
                 comment += f" ({intf.alias})"
@@ -1365,6 +1368,7 @@ provider "panos" {
 
         # Generate VLAN subinterfaces
         for name, intf in vlan_intfs.items():
+            self.generated_interfaces.add(name)
             tf_name = self.sanitize_name(f"intf_{name}")
             parent_panos = self._map_interface_name(intf.interface)
             panos_name = f"{parent_panos}.{intf.vlanid}"
@@ -1421,39 +1425,29 @@ provider "panos" {
                     zones_to_create.add(intf)
                     self.zone_mapping[intf] = intf
 
-        def _intf_is_generated(intf, intf_name):
-            if intf.type in ('loopback', 'tunnel', 'ssl', 'wl-mesh'):
-                return False
-            if intf_name in ('ssl.root', 'self', 'fortilink'):
-                return False
-            if intf_name.startswith('ha') or intf_name in ('mgmt', 'management'):
-                return False
-            return True
-
         for zone_name in sorted(zones_to_create):
             tf_name = self.sanitize_name(zone_name)
 
-            # Try to populate zone interfaces from FortiGate zone members or the zone name itself
+            # Try to populate zone interfaces from FortiGate zone members or the zone name itself.
+            # Only reference interfaces that were actually emitted as TF resources.
             zone_intf_refs = []
             if zone_name in self.parser.zones:
                 for member in self.parser.zones[zone_name]:
-                    if member in self.parser.interfaces:
-                        intf = self.parser.interfaces[member]
-                        if not _intf_is_generated(intf, member):
-                            continue
-                        intf_tf = self.sanitize_name(f"intf_{member}")
-                        if intf.type == 'vlan' and intf.vlanid and intf.interface:
-                            zone_intf_refs.append(f'    panos_ethernet_layer3_subinterface.{intf_tf}.name')
-                        else:
-                            zone_intf_refs.append(f'    panos_ethernet_interface.{intf_tf}.name')
-            elif zone_name in self.parser.interfaces:
-                intf = self.parser.interfaces[zone_name]
-                if _intf_is_generated(intf, zone_name):
-                    intf_tf = self.sanitize_name(f"intf_{zone_name}")
-                    if intf.type == 'vlan' and intf.vlanid and intf.interface:
+                    if member not in self.generated_interfaces:
+                        continue
+                    intf = self.parser.interfaces.get(member)
+                    intf_tf = self.sanitize_name(f"intf_{member}")
+                    if intf and intf.type == 'vlan' and intf.vlanid and intf.interface:
                         zone_intf_refs.append(f'    panos_ethernet_layer3_subinterface.{intf_tf}.name')
                     else:
                         zone_intf_refs.append(f'    panos_ethernet_interface.{intf_tf}.name')
+            elif zone_name in self.generated_interfaces:
+                intf = self.parser.interfaces.get(zone_name)
+                intf_tf = self.sanitize_name(f"intf_{zone_name}")
+                if intf and intf.type == 'vlan' and intf.vlanid and intf.interface:
+                    zone_intf_refs.append(f'    panos_ethernet_layer3_subinterface.{intf_tf}.name')
+                else:
+                    zone_intf_refs.append(f'    panos_ethernet_interface.{intf_tf}.name')
 
             if zone_intf_refs:
                 intf_list = ',\n'.join(zone_intf_refs)
