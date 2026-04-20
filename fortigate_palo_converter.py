@@ -1045,11 +1045,14 @@ provider "panos" {
             if not regular_members:
                 continue  # Skip empty groups (all members were wildcard FQDNs)
 
-            # Format static members
-            members_list = [f'    panos_address.{self.sanitize_name(m)}.name'
-                           for m in regular_members]
+            # Format static members — nested groups reference panos_address_group
+            def _member_ref(m: str) -> str:
+                kind = 'panos_address_group' if m in self.parser.address_groups else 'panos_address'
+                return kind, self.sanitize_name(m)
+
+            members_list = [f'    {k}.{n}.name' for k, n in (_member_ref(m) for m in regular_members)]
             members_str = ',\n'.join(members_list)
-            depends_str = ',\n'.join(f'    panos_address.{self.sanitize_name(m)}' for m in regular_members)
+            depends_str = ',\n'.join(f'    {k}.{n}' for k, n in (_member_ref(m) for m in regular_members))
 
             wildcard_comment = ""
             if wildcard_members:
@@ -1582,6 +1585,8 @@ resource "panos_address" "{tf_name}_nat_pool" {{
                 addr_obj = self.parser.addresses.get(addr)
                 if addr_obj and addr_obj.type == 'wildcard-fqdn':
                     url_category_refs.append(f'    panos_custom_url_category.{self.sanitize_name(addr)}.name')
+                elif addr in self.parser.address_groups:
+                    source_addr_refs.append(f'    panos_address_group.{self.sanitize_name(addr)}.name')
                 else:
                     source_addr_refs.append(f'    panos_address.{self.sanitize_name(addr)}.name')
 
@@ -1594,6 +1599,8 @@ resource "panos_address" "{tf_name}_nat_pool" {{
                 addr_obj = self.parser.addresses.get(addr)
                 if addr_obj and addr_obj.type == 'wildcard-fqdn':
                     url_category_refs.append(f'    panos_custom_url_category.{self.sanitize_name(addr)}.name')
+                elif addr in self.parser.address_groups:
+                    dest_addr_refs.append(f'    panos_address_group.{self.sanitize_name(addr)}.name')
                 else:
                     dest_addr_refs.append(f'    panos_address.{self.sanitize_name(addr)}.name')
 
