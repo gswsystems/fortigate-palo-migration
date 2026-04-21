@@ -629,6 +629,7 @@ class MigrationReportGenerator:
         sections.append(self._generate_vpn_worksheet())
         sections.append(self._generate_routing_worksheet())
         sections.append(self._generate_security_profile_guide())
+        sections.append(self._generate_policy_utm_attachments())
         sections.append(self._generate_validation_checklist())
         sections.append(self._generate_rollback_plan())
         
@@ -958,7 +959,56 @@ No manual tasks required. All configuration has been automated.
         
         output.append("\n---")
         return "".join(output)
-    
+
+    def _generate_policy_utm_attachments(self) -> str:
+        """List every policy that had UTM profile attachments on FortiGate.
+
+        FortiGate UTM profiles aren't emitted into the Terraform output (names
+        don't resolve on PAN-OS), so this table is the record the operator
+        needs to re-attach equivalent profiles after recreating them manually.
+        """
+        utm_fields = [
+            ('av_profile', 'Antivirus'),
+            ('ips_sensor', 'IPS'),
+            ('webfilter_profile', 'Web Filter'),
+            ('application_list', 'App Control'),
+            ('ssl_ssh_profile', 'SSL/SSH'),
+            ('profile_group', 'Profile Group'),
+        ]
+
+        rows = []
+        for policy in self.base.policies:
+            attachments = [
+                (label, getattr(policy, attr))
+                for attr, label in utm_fields
+                if getattr(policy, attr, None)
+            ]
+            if not attachments:
+                continue
+            rows.append((policy, attachments))
+
+        if not rows:
+            return ""
+
+        lines = ["## Policy → UTM Profile Attachments\n"]
+        lines.append(
+            "FortiGate UTM profile references are **not** emitted into "
+            "`palo_alto.tf` because the profile names do not exist in PAN-OS. "
+            "After recreating the equivalent Security Profiles manually (see "
+            "the Security Profiles Configuration Guide above), use this table "
+            "to re-attach them to the corresponding security policies.\n"
+        )
+        lines.append("| Policy ID | Policy Name | Attachments |")
+        lines.append("|-----------|-------------|-------------|")
+        for policy, attachments in rows:
+            name = policy.name or f"policy_{policy.policyid}"
+            attach_str = "<br>".join(f"**{label}:** `{value}`" for label, value in attachments)
+            lines.append(f"| {policy.policyid} | {name} | {attach_str} |")
+
+        lines.append(f"\n**Total policies with UTM attachments:** {len(rows)}\n")
+        lines.append("\n---")
+        return "\n".join(lines)
+
     def _generate_validation_checklist(self) -> str:
         """Generate validation checklist"""
         return """## Post-Migration Validation Checklist

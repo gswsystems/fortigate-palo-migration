@@ -1660,33 +1660,10 @@ resource "panos_address" "{tf_name}_nat_pool" {{
             log_setting = """
     log_end   = true"""
 
-        # Security profiles
+        # Security profiles: FortiGate UTM profiles do not translate 1:1 to PAN-OS
+        # and must be recreated manually (see migration report). Emitting references
+        # here produces dangling pointers on apply, so we skip them entirely.
         profile_setting_str = ""
-        if policy.profile_group:
-            profile_setting_str = f"""
-    profile_setting = {{
-      group = ["{policy.profile_group}"]
-    }}"""
-        else:
-            profiles = {}
-            if policy.av_profile:
-                profiles['virus'] = policy.av_profile
-            if policy.ips_sensor:
-                profiles['vulnerability'] = policy.ips_sensor
-            if policy.webfilter_profile:
-                profiles['url_filtering'] = policy.webfilter_profile
-            if policy.application_list:
-                profiles['spyware'] = policy.application_list
-            if profiles:
-                profile_lines = ',\n'.join(
-                    f'        {k} = ["{v}"]' for k, v in profiles.items()
-                )
-                profile_setting_str = f"""
-    profile_setting = {{
-      profiles = {{
-{profile_lines}
-      }}
-    }}"""
 
         resource = f"""resource "panos_security_policy_rules" "{tf_name}" {{
 {location}
